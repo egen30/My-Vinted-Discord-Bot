@@ -43,6 +43,10 @@ type VintedResponse struct {
 				} `json:"extra"`
 			} `json:"photo"`
 			Business bool `json:"business"`
+			Feedback struct {
+				Score float64 `json:"score"`
+				Count int `json:"count"`
+			} `json:"feedback"`
 		} `json:"user"`
 		Conversion interface{} `json:"conversion"`
 		URL        string      `json:"url"`

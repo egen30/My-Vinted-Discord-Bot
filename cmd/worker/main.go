@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -113,8 +114,27 @@ func main() {
 		logger.Info("Google Sheets history synchronized", zap.Int("accepted_rows", len(snapshot.Sales)), zap.Int("rejected_rows", len(snapshot.Rejected)))
 	}
 
-	processItems := func(items []models.Item) {
-		for _, item := range items {
+	type discoveredListing struct {
+		item      models.Item
+		searchIDs []int64
+	}
+	processItems := func(entries []discoveredListing) {
+		for _, entry := range entries {
+			item := entry.item
+			var listingID int64
+			if listingStore != nil && len(entry.searchIDs) > 0 {
+				var persistErr error
+				listingID, persistErr = listingStore.UpsertListing(ctx, item, entry.searchIDs[0])
+				if persistErr != nil {
+					logger.Error("Could not persist listing; continuing notification", zap.String("item_id", item.ID), zap.Error(persistErr))
+				} else {
+					for _, searchID := range entry.searchIDs[1:] {
+						if _, attributionErr := listingStore.UpsertListing(ctx, item, searchID); attributionErr != nil {
+							logger.Error("Could not persist listing attribution", zap.String("item_id", item.ID), zap.Error(attributionErr))
+						}
+					}
+				}
+			}
 			if item.Price < float64(config.minPrice) || item.Price > float64(config.maxPrice) {
 				continue
 			}
@@ -146,6 +166,9 @@ func main() {
 
 			if err := notifier.SendItem(ctx, item); err != nil {
 				logger.Error("Discord notification failed", zap.String("item_id", item.ID), zap.Error(err))
+				if listingStore != nil && listingID != 0 {
+					_ = listingStore.RecordNotification(ctx, listingID, "discord", err)
+				}
 				if forgetErr := deduplicator.Forget(ctx, item.ID); forgetErr != nil {
 					logger.Error("Could not release failed notification", zap.String("item_id", item.ID), zap.Error(forgetErr))
 				}
@@ -153,6 +176,11 @@ func main() {
 					return
 				}
 				continue
+			}
+			if listingStore != nil && listingID != 0 {
+				if recordErr := listingStore.RecordNotification(ctx, listingID, "discord", nil); recordErr != nil {
+					logger.Error("Could not record notification", zap.String("item_id", item.ID), zap.Error(recordErr))
+				}
 			}
 			logger.Info("Discord notification sent", zap.String("item_id", item.ID), zap.String("title", item.Title))
 			if !waitForNextNotification(ctx) {
@@ -170,6 +198,8 @@ func main() {
 				return
 			}
 			if len(searches) > 0 {
+				var mu sync.Mutex
+				byID := make(map[string]*discoveredListing)
 				err = scheduler.RunOnce(ctx, searches, config.searchConcurrency, func(searchCtx context.Context, search models.Search) error {
 					searchJob, parseErr := vinted.JobFromSearchURL(search.URL)
 					if parseErr != nil {
@@ -183,12 +213,27 @@ func main() {
 						return searchErr
 					}
 					_ = listingStore.RecordSearchAttempt(context.Background(), search.ID, nil)
-					processItems(items)
+					mu.Lock()
+					for _, item := range items {
+						entry := byID[item.ID]
+						if entry == nil {
+							entry = &discoveredListing{item: item}
+							byID[item.ID] = entry
+						}
+						if !containsSearchID(entry.searchIDs, search.ID) {
+							entry.searchIDs = append(entry.searchIDs, search.ID)
+							entry.item.FoundBy = append(entry.item.FoundBy, search.Name)
+						}
+					}
+					mu.Unlock()
 					return nil
 				})
 				if err != nil {
 					logger.Error("One or more Vinted searches failed", zap.Error(err))
 				}
+				entries := make([]discoveredListing, 0, len(byID))
+				for _, entry := range byID { entries = append(entries, *entry) }
+				processItems(entries)
 				return
 			}
 		}
@@ -197,7 +242,9 @@ func main() {
 			logger.Error("Vinted search failed", zap.Error(err))
 			return
 		}
-		processItems(items)
+		entries := make([]discoveredListing, 0, len(items))
+		for _, item := range items { entries = append(entries, discoveredListing{item: item}) }
+		processItems(entries)
 	}
 
 	logger.Info("Worker started", zap.String("query", config.searchQuery), zap.Int("max_price", config.maxPrice), zap.Duration("interval", config.interval))
@@ -323,4 +370,11 @@ func splitIDs(value string) []string {
 		}
 	}
 	return ids
+}
+
+func containsSearchID(ids []int64, wanted int64) bool {
+	for _, id := range ids {
+		if id == wanted { return true }
+	}
+	return false
 }

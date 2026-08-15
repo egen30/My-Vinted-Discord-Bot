@@ -44,7 +44,16 @@ func (n *DiscordNotifier) SendOpportunity(ctx context.Context, opportunity model
 		title = item.Brand + " | " + title
 	}
 	description := fmt.Sprintf("**Price:** %.2f %s\n[Open listing](%s)", item.Price, item.Currency, item.URL)
+	if item.Description != "" {
+		description += "\n\n" + excerpt(item.Description, 300)
+	}
 	fields := []discordField{}
+	if item.Seller.Username != "" {
+		fields = append(fields, discordField{Name: "Seller", Value: item.Seller.Username, Inline: true})
+	}
+	if item.Seller.Rating > 0 {
+		fields = append(fields, discordField{Name: "Seller rating", Value: fmt.Sprintf("%.1f (%d reviews)", item.Seller.Rating, item.Seller.ReviewCount), Inline: true})
+	}
 	if opportunity.ExpectedResaleCents > 0 {
 		fields = append(fields,
 			discordField{Name: "Expected resale", Value: formatCents(opportunity.ExpectedResaleCents, item.Currency), Inline: true},
@@ -58,6 +67,9 @@ func (n *DiscordNotifier) SendOpportunity(ctx context.Context, opportunity model
 	}
 	if item.Size != "" {
 		fields = append(fields, discordField{Name: "Size", Value: item.Size, Inline: true})
+	}
+	if len(item.FoundBy) > 0 {
+		fields = append(fields, discordField{Name: "Found through", Value: strings.Join(item.FoundBy, ", "), Inline: false})
 	}
 	embed := discordEmbed{Title: title, URL: item.URL, Description: description, Color: 0x09B1BA, Fields: fields}
 	if item.ImageURL != "" {
@@ -120,4 +132,10 @@ type discordImage struct {
 
 func formatCents(cents int64, currency string) string {
 	return fmt.Sprintf("%.2f %s", float64(cents)/100, currency)
+}
+
+func excerpt(value string, maxLength int) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= maxLength { return value }
+	return value[:maxLength-1] + "…"
 }
