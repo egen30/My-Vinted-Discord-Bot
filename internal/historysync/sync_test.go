@@ -27,5 +27,8 @@ func TestSyncPublishesValidRowsAndDiagnostics(t *testing.T) {
 	if len(syncer.Current().Sales) != 1 {
 		t.Fatal("expected published snapshot")
 	}
+	if snapshot.SyncedAt.IsZero() {
+		t.Fatal("expected sync timestamp")
+	}
 	_ = history.Sale{}
 }

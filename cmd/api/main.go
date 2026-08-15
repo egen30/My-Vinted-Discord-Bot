@@ -62,6 +62,8 @@ func (h *searchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.delete(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/admin/searches":
 		h.createFromForm(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/admin/history":
+		h.saveHistoryFromForm(w, r)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/admin/searches/"):
 		h.adminAction(w, r)
 	default:
@@ -72,6 +74,7 @@ func (h *searchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 type adminPageData struct {
 	Searches []models.Search
 	Listings []models.ListingSummary
+	History  models.HistorySource
 	Error    string
 }
 
@@ -86,12 +89,31 @@ func (h *searchHandler) adminPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not load listings", http.StatusInternalServerError)
 		return
 	}
+	historySource, err := h.store.GetHistorySource(r.Context())
+	if err != nil {
+		http.Error(w, "could not load history settings", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := adminTemplate.Execute(w, adminPageData{Searches: searches, Listings: listings}); err != nil {
+	if err := adminTemplate.Execute(w, adminPageData{Searches: searches, Listings: listings, History: historySource}); err != nil {
 		// The response may already have started; logging is intentionally omitted
 		// because the page contains no sensitive request data.
 		return
 	}
+}
+
+func (h *searchHandler) saveHistoryFromForm(w http.ResponseWriter, r *http.Request) {
+	spreadsheetURL := strings.TrimSpace(r.FormValue("spreadsheet_url"))
+	worksheet := strings.TrimSpace(r.FormValue("worksheet"))
+	if err := validateHistorySource(spreadsheetURL, worksheet); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if _, err := h.store.SaveHistorySource(r.Context(), models.HistorySource{SpreadsheetURL: spreadsheetURL, Worksheet: worksheet, Enabled: r.FormValue("enabled") == "on"}); err != nil {
+		http.Error(w, "could not save history settings", http.StatusInternalServerError)
+		return
+	}
+	h.redirectAdmin(w, r)
 }
 
 func (h *searchHandler) createFromForm(w http.ResponseWriter, r *http.Request) {
@@ -257,6 +279,17 @@ func validateSearch(search models.Search) error {
 	return nil
 }
 
+func validateHistorySource(spreadsheetURL, worksheet string) error {
+	parsed, err := url.Parse(strings.TrimSpace(spreadsheetURL))
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() != "docs.google.com" || !strings.HasPrefix(parsed.Path, "/spreadsheets/d/") {
+		return fmt.Errorf("spreadsheet URL must be an HTTPS Google Sheets URL")
+	}
+	if strings.TrimSpace(worksheet) == "" {
+		return fmt.Errorf("worksheet is required")
+	}
+	return nil
+}
+
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -283,4 +316,4 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{
 <body><main class="shell"><header class="topbar"><div><p class="eyebrow">Vinted Scout · Control room</p><h1>Find the next great pair.</h1><p class="lede">Manage your sourcing searches, inspect recent finds, and keep optional enrichment safely out of the alert path.</p></div><div class="pulse"><span class="dot"></span>Monitor online</div></header>
 <section class="stats"><div class="stat"><span class="stat-label">Configured searches</span><span class="stat-value">{{len .Searches}}</span></div><div class="stat"><span class="stat-label">Active searches</span><span class="stat-value">{{activeCount .Searches}}</span><span class="meta">Enable only the sources you want polled</span></div><div class="stat"><span class="stat-label">Recent listings</span><span class="stat-value">{{len .Listings}}</span></div></section>
 <div class="layout"><section class="panel"><div class="panel-head"><div><h2>Sourcing searches</h2><span class="meta">Each enabled URL is monitored independently.</span></div><span class="badge">{{len .Searches}} total</span></div><form method="post" action="/admin/searches"><div class="form-grid"><div class="field"><label for="name">Search name</label><input id="name" name="name" placeholder="e.g. Nike Air Max 42" required></div><div class="field"><label for="url">Vinted catalog URL</label><input id="url" name="url" type="url" placeholder="https://www.vinted.de/catalog?..." required></div><div class="field"><label for="priority">Priority</label><input id="priority" name="priority" type="number" value="0"></div><div class="field full"><label for="notes">Notes</label><input id="notes" name="notes" placeholder="Optional sourcing context"></div></div><label class="check"><input name="enabled" type="checkbox" checked> Start monitoring immediately</label><button class="primary">＋ Add search</button></form><div class="search-list">{{range .Searches}}<article class="search-card"><div><div class="search-title"><span class="status {{if .Enabled}}on{{end}}"></span>{{.Name}} <span class="badge">P{{.Priority}}</span></div><div class="search-url">{{.URL}}</div>{{if .Notes}}<div class="meta">{{.Notes}}</div>{{end}}<div class="health">{{if .LastError}}<span class="error">Issue: {{.LastError}}</span>{{else if .LastSuccessfulAt}}Last successful check: {{.LastSuccessfulAt}}{{else}}Waiting for first check{{end}}</div></div><div class="actions"><form method="post" action="/admin/searches/{{.ID}}/toggle"><button class="ghost">{{if .Enabled}}Pause{{else}}Enable{{end}}</button></form><form method="post" action="/admin/searches/{{.ID}}/delete"><button class="danger">Delete</button></form></div><details class="edit"><summary>Edit search</summary><form method="post" action="/admin/searches/{{.ID}}/update"><div class="edit-grid"><input name="name" value="{{.Name}}" required><input name="url" value="{{.URL}}" type="url" required><input name="priority" type="number" value="{{.Priority}}"><input class="full" name="notes" value="{{.Notes}}"></div><label class="check"><input name="enabled" type="checkbox" {{if .Enabled}}checked{{end}}> Enabled</label><button class="primary">Save changes</button></form></details></article>{{else}}<div class="empty">No searches yet. Add your first Vinted catalog URL above.</div>{{end}}</div></section>
-<aside class="panel"><div class="panel-head"><div><h2>Recent listings</h2><span class="meta">Newest records from the monitor</span></div><span class="badge">{{len .Listings}}</span></div><div class="listing-list">{{range .Listings}}<article class="listing-card"><div><a class="listing-title" href="{{.URL}}" target="_blank" rel="noreferrer">{{.Title}}</a><div class="meta">{{.Seller}} · {{.ExternalID}}</div><div class="meta">{{.FirstSeenAt}} · {{range $i, $name := .SearchNames}}{{if $i}}, {{end}}{{$name}}{{end}}</div></div><div class="price">{{printf "%.2f" (div .PriceCents 100)}} {{.Currency}}</div></article>{{else}}<div class="empty">No listings recorded yet.<br>New finds will appear here.</div>{{end}}</div><div class="module"><div class="module-icon">↗</div><div><strong>Optional enrichment</strong><p>Historical data, profitability, image analysis, and Deal Score remain failure-isolated.</p></div></div><div class="module"><div class="module-icon">✓</div><div><strong>Safe by default</strong><p>Alerts never require a model, size, resale estimate, or AI result.</p></div></div></aside></div><p class="footer">Vinted Scout · Configure secrets and database settings in your environment, not in source control.</p></main></body></html>`))
+<aside class="panel"><div class="panel-head"><div><h2>Recent listings</h2><span class="meta">Newest records from the monitor</span></div><span class="badge">{{len .Listings}}</span></div><div class="listing-list">{{range .Listings}}<article class="listing-card"><div><a class="listing-title" href="{{.URL}}" target="_blank" rel="noreferrer">{{.Title}}</a><div class="meta">{{.Seller}} · {{.ExternalID}}</div><div class="meta">{{.FirstSeenAt}} · {{range $i, $name := .SearchNames}}{{if $i}}, {{end}}{{$name}}{{end}}</div></div><div class="price">{{printf "%.2f" (div .PriceCents 100)}} {{.Currency}}</div></article>{{else}}<div class="empty">No listings recorded yet.<br>New finds will appear here.</div>{{end}}</div><div class="module"><div class="module-icon">↗</div><div><strong>Google Sheets history</strong><p>Configure the optional read-only sales source. Credentials stay in the worker environment.</p><form method="post" action="/admin/history" style="margin-top:10px"><div class="field"><label for="spreadsheet_url">Spreadsheet URL</label><input id="spreadsheet_url" name="spreadsheet_url" type="url" value="{{.History.SpreadsheetURL}}" placeholder="https://docs.google.com/spreadsheets/d/..." required></div><div class="field" style="margin-top:8px"><label for="worksheet">Worksheet / tab</label><input id="worksheet" name="worksheet" value="{{.History.Worksheet}}" placeholder="Sales" required></div><label class="check" style="margin-top:8px"><input name="enabled" type="checkbox" {{if .History.Enabled}}checked{{end}}> Enable history sync</label><button class="primary">Save history settings</button></form>{{if .History.LastSyncAt}}<div class="health">Last sync: {{.History.LastSyncAt}} · {{.History.AcceptedRows}} accepted · {{.History.RejectedRows}} rejected</div>{{end}}{{if .History.LastError}}<div class="health error">Issue: {{.History.LastError}}</div>{{end}}</div></div><div class="module"><div class="module-icon">✓</div><div><strong>Safe by default</strong><p>Alerts never require a model, size, resale estimate, or AI result.</p></div></div></aside></div><p class="footer">Vinted Scout · Configure secrets and database settings in your environment, not in source control.</p></main></body></html>`))

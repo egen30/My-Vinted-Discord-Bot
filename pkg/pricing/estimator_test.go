@@ -25,3 +25,13 @@ func TestEstimatorFallsBackWhenDataIsInsufficient(t *testing.T) {
 		t.Fatalf("unexpected fallback: %+v, %v", got, ok)
 	}
 }
+
+func TestEstimatorUsesNormalizedModelFields(t *testing.T) {
+	estimator := Estimator{MinimumModelData: 1, MinimumSegmentData: 1, Sales: []history.Sale{
+		{Model: "P 6000 Nike", NormalizedModel: "P-6000", NormalizedSize: "42", NormalizedCondition: "good", SaleCents: 3500},
+	}}
+	got, ok := estimator.Estimate("P-6000", "42", "good")
+	if !ok || got.ExpectedCents != 3500 {
+		t.Fatalf("expected normalized sale match, got %+v, %v", got, ok)
+	}
+}

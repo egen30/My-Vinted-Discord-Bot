@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/2spy/vinted-discord-bot/pkg/history"
 	"golang.org/x/oauth2/google"
@@ -63,6 +64,7 @@ type Diagnostic struct {
 type Snapshot struct {
 	Sales    []history.Sale
 	Rejected []Diagnostic
+	SyncedAt time.Time
 }
 
 type Syncer struct {
@@ -99,7 +101,7 @@ func (s *Syncer) Sync(ctx context.Context) (Snapshot, error) {
 		}
 		accepted = append(accepted, sales...)
 	}
-	snapshot := Snapshot{Sales: accepted, Rejected: rejected}
+	snapshot := Snapshot{Sales: accepted, Rejected: rejected, SyncedAt: time.Now().UTC()}
 	s.mu.Lock()
 	s.latest = snapshot
 	s.mu.Unlock()
@@ -109,7 +111,7 @@ func (s *Syncer) Sync(ctx context.Context) (Snapshot, error) {
 func (s *Syncer) Current() Snapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return Snapshot{Sales: append([]history.Sale(nil), s.latest.Sales...), Rejected: append([]Diagnostic(nil), s.latest.Rejected...)}
+	return Snapshot{Sales: append([]history.Sale(nil), s.latest.Sales...), Rejected: append([]Diagnostic(nil), s.latest.Rejected...), SyncedAt: s.latest.SyncedAt}
 }
 
 func csvLine(values []string) string {

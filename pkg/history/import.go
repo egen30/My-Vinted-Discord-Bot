@@ -11,15 +11,24 @@ import (
 )
 
 type Sale struct {
-	Model         string
-	Size          string
-	Condition     string
-	PurchaseCents int64
-	SaleCents     int64
-	CostsCents    int64
-	PurchasedAt   *time.Time
-	SoldAt        *time.Time
-	Source        string
+	// Model, Size, and Condition retain the source values for compatibility
+	// with existing imports. Normalized* fields are used for matching.
+	Model               string
+	Size                string
+	Condition           string
+	OriginalModel       string
+	Brand               string
+	NormalizedModel     string
+	NormalizedSize      string
+	NormalizedCondition string
+	SourceRow           int
+	PurchaseCents       int64
+	SaleCents           int64
+	CostsCents          int64
+	PurchasedAt         *time.Time
+	SoldAt              *time.Time
+	DaysToSell          *int
+	Source              string
 }
 
 // ParseCSV accepts the required model, purchase_price, and sale_price columns
@@ -56,7 +65,7 @@ func ParseCSV(r io.Reader) ([]Sale, error) {
 		if err != nil {
 			return nil, fmt.Errorf("row %d purchase_price: %w", rowNumber, err)
 		}
-		sale, err := parseCents(field(row, columns, "sale_price"))
+		saleCents, err := parseCents(field(row, columns, "sale_price"))
 		if err != nil {
 			return nil, fmt.Errorf("row %d sale_price: %w", rowNumber, err)
 		}
@@ -72,7 +81,12 @@ func ParseCSV(r io.Reader) ([]Sale, error) {
 		if err != nil {
 			return nil, fmt.Errorf("row %d sold_at: %w", rowNumber, err)
 		}
-		result = append(result, Sale{Model: model, Size: strings.TrimSpace(field(row, columns, "size")), Condition: strings.TrimSpace(field(row, columns, "condition")), PurchaseCents: purchase, SaleCents: sale, CostsCents: costs, PurchasedAt: purchasedAt, SoldAt: soldAt, Source: strings.TrimSpace(field(row, columns, "source"))})
+		sale := Sale{
+			Model: model, Size: strings.TrimSpace(field(row, columns, "size")), Condition: strings.TrimSpace(field(row, columns, "condition")),
+			PurchaseCents: purchase, SaleCents: saleCents, CostsCents: costs, PurchasedAt: purchasedAt, SoldAt: soldAt,
+			Source: strings.TrimSpace(field(row, columns, "source")), SourceRow: rowNumber,
+		}
+		result = append(result, NormalizeSale(sale))
 	}
 	return result, nil
 }

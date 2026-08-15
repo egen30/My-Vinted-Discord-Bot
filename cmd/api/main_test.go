@@ -17,3 +17,15 @@ func TestValidateSearchRejectsNonVintedURL(t *testing.T) {
 		t.Fatal("expected unsupported host error")
 	}
 }
+
+func TestValidateHistorySource(t *testing.T) {
+	if err := validateHistorySource("https://docs.google.com/spreadsheets/d/example/edit", "Sales"); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateHistorySource("https://example.com/sheet", "Sales"); err == nil {
+		t.Fatal("expected invalid spreadsheet URL")
+	}
+	if err := validateHistorySource("https://docs.google.com/spreadsheets/d/example/edit", ""); err == nil {
+		t.Fatal("expected missing worksheet error")
+	}
+}

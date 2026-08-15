@@ -35,11 +35,23 @@ func (e Estimator) Estimate(model, size, condition string) (Estimate, bool) {
 	segment := make([]int64, 0)
 	modelPrices := make([]int64, 0)
 	for _, sale := range e.Sales {
-		if strings.ToLower(strings.TrimSpace(sale.Model)) != model {
+		saleModel := sale.NormalizedModel
+		if saleModel == "" {
+			saleModel = sale.Model
+		}
+		if strings.ToLower(strings.TrimSpace(saleModel)) != model {
 			continue
 		}
 		modelPrices = append(modelPrices, sale.SaleCents)
-		if strings.ToLower(strings.TrimSpace(sale.Size)) == strings.ToLower(strings.TrimSpace(size)) && strings.ToLower(strings.TrimSpace(sale.Condition)) == condition {
+		saleSize := sale.NormalizedSize
+		if saleSize == "" {
+			saleSize = sale.Size
+		}
+		saleCondition := sale.NormalizedCondition
+		if saleCondition == "" {
+			saleCondition = sale.Condition
+		}
+		if strings.ToLower(strings.TrimSpace(saleSize)) == strings.ToLower(strings.TrimSpace(size)) && strings.ToLower(strings.TrimSpace(saleCondition)) == condition {
 			segment = append(segment, sale.SaleCents)
 		}
 	}

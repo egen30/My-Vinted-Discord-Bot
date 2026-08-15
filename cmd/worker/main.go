@@ -107,7 +107,11 @@ func main() {
 		}
 		salesHistory = snapshot.Sales
 		if listingStore != nil {
-			if persistErr := listingStore.ReplaceSalesHistory(context.Background(), salesHistory); persistErr != nil {
+			rejected := make([]string, 0, len(snapshot.Rejected))
+			for _, diagnostic := range snapshot.Rejected {
+				rejected = append(rejected, diagnostic.Reason)
+			}
+			if persistErr := listingStore.ReplaceSalesHistorySnapshot(context.Background(), salesHistory, rejected, "google_sheets"); persistErr != nil {
 				logger.Error("Could not publish Google Sheets history to PostgreSQL", zap.Error(persistErr))
 			}
 		}
@@ -120,19 +124,10 @@ func main() {
 			var listingID int64
 			if listingStore != nil && len(entry.SearchIDs) > 0 {
 				var persistErr error
-				listingID, persistErr = listingStore.UpsertListing(ctx, item, entry.SearchIDs[0])
+				listingID, persistErr = listingStore.UpsertListing(ctx, item, entry.SearchIDs)
 				if persistErr != nil {
 					logger.Error("Could not persist listing; continuing notification", zap.String("item_id", item.ID), zap.Error(persistErr))
-				} else {
-					for _, searchID := range entry.SearchIDs[1:] {
-						if _, attributionErr := listingStore.UpsertListing(ctx, item, searchID); attributionErr != nil {
-							logger.Error("Could not persist listing attribution", zap.String("item_id", item.ID), zap.Error(attributionErr))
-						}
-					}
 				}
-			}
-			if item.Price < float64(config.minPrice) || item.Price > float64(config.maxPrice) {
-				continue
 			}
 			condition := evaluation.Condition(strings.ToLower(strings.TrimSpace(item.Condition)))
 			model, modelErr := evaluation.MatchModel(item.Brand + " " + item.Title)
@@ -160,7 +155,7 @@ func main() {
 				continue
 			}
 
-			if err := notifier.SendItem(ctx, item); err != nil {
+			if err := notifier.SendListing(ctx, models.Opportunity{Item: item}); err != nil {
 				logger.Error("Discord notification failed", zap.String("item_id", item.ID), zap.Error(err))
 				if listingStore != nil && listingID != 0 {
 					_ = listingStore.RecordNotification(ctx, listingID, "discord", err)

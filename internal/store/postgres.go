@@ -70,6 +70,29 @@ func (s *PostgresStore) DeleteSearch(ctx context.Context, id int64) error {
 	return nil
 }
 
+func (s *PostgresStore) GetHistorySource(ctx context.Context) (models.HistorySource, error) {
+	var source models.HistorySource
+	err := s.db.QueryRow(ctx, `SELECT spreadsheet_url, worksheet, enabled, updated_at, last_sync_at, last_error, accepted_rows, rejected_rows FROM history_source WHERE id = 1`).Scan(
+		&source.SpreadsheetURL, &source.Worksheet, &source.Enabled, &source.UpdatedAt, &source.LastSyncAt, &source.LastError, &source.AcceptedRows, &source.RejectedRows)
+	if err != nil {
+		return models.HistorySource{}, fmt.Errorf("get history source: %w", err)
+	}
+	return source, nil
+}
+
+func (s *PostgresStore) SaveHistorySource(ctx context.Context, source models.HistorySource) (models.HistorySource, error) {
+	const query = `INSERT INTO history_source (id, spreadsheet_url, worksheet, enabled, updated_at) VALUES (1,$1,$2,$3,now())
+ON CONFLICT (id) DO UPDATE SET spreadsheet_url=EXCLUDED.spreadsheet_url, worksheet=EXCLUDED.worksheet, enabled=EXCLUDED.enabled, updated_at=now()
+RETURNING spreadsheet_url, worksheet, enabled, updated_at, last_sync_at, last_error, accepted_rows, rejected_rows`
+	var saved models.HistorySource
+	err := s.db.QueryRow(ctx, query, source.SpreadsheetURL, source.Worksheet, source.Enabled).Scan(
+		&saved.SpreadsheetURL, &saved.Worksheet, &saved.Enabled, &saved.UpdatedAt, &saved.LastSyncAt, &saved.LastError, &saved.AcceptedRows, &saved.RejectedRows)
+	if err != nil {
+		return models.HistorySource{}, fmt.Errorf("save history source: %w", err)
+	}
+	return saved, nil
+}
+
 func (s *PostgresStore) UpdateSearch(ctx context.Context, search models.Search) (models.Search, error) {
 	const query = `UPDATE searches SET name = $1, url = $2, enabled = $3, priority = $4, notes = $5 WHERE id = $6
 RETURNING id, name, url, enabled, priority, notes, created_at, last_attempted_at, last_successful_at, last_error`
@@ -89,10 +112,13 @@ func (s *PostgresStore) RecordSearchAttempt(ctx context.Context, id int64, runEr
 	return err
 }
 
-// UpsertListing stores the latest marketplace representation and records the
-// search attribution in the same transaction. A listing identity is scoped by
-// platform so another marketplace can reuse the same external ID safely.
-func (s *PostgresStore) UpsertListing(ctx context.Context, item models.Item, searchID int64) (int64, error) {
+// UpsertListing stores the latest marketplace representation and all search
+// attributions in one transaction. A listing identity is scoped by platform
+// so another marketplace can reuse the same external ID safely.
+func (s *PostgresStore) UpsertListing(ctx context.Context, item models.Item, searchIDs []int64) (int64, error) {
+	if len(searchIDs) == 0 {
+		return 0, fmt.Errorf("at least one search ID is required")
+	}
 	images, err := json.Marshal(item.ImageURLs)
 	if err != nil {
 		return 0, fmt.Errorf("marshal listing images: %w", err)
@@ -124,10 +150,17 @@ func (s *PostgresStore) UpsertListing(ctx context.Context, item models.Item, sea
 	if err != nil {
 		return 0, fmt.Errorf("upsert listing: %w", err)
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO listing_searches (listing_id, search_id) VALUES ($1,$2)
+	seenSearchIDs := make(map[int64]struct{}, len(searchIDs))
+	for _, searchID := range searchIDs {
+		if _, seen := seenSearchIDs[searchID]; seen {
+			continue
+		}
+		seenSearchIDs[searchID] = struct{}{}
+		_, err = tx.Exec(ctx, `INSERT INTO listing_searches (listing_id, search_id) VALUES ($1,$2)
 ON CONFLICT (listing_id, search_id) DO UPDATE SET last_discovered_at=now(), discovery_count=listing_searches.discovery_count+1`, listingID, searchID)
-	if err != nil {
-		return 0, fmt.Errorf("record listing attribution: %w", err)
+		if err != nil {
+			return 0, fmt.Errorf("record listing attribution: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("commit listing upsert: %w", err)
@@ -186,16 +219,23 @@ func (s *PostgresStore) RecordNotification(ctx context.Context, listingID int64,
 // ReplaceSalesHistory atomically publishes the latest validated sheet snapshot.
 // It intentionally stores only business history, never raw Vinted discoveries.
 func (s *PostgresStore) ReplaceSalesHistory(ctx context.Context, sales []history.Sale) error {
+	return s.ReplaceSalesHistorySnapshot(ctx, sales, nil, "legacy")
+}
+
+// ReplaceSalesHistorySnapshot publishes a new immutable history snapshot.
+// Existing snapshots remain available for auditability and future comparison.
+func (s *PostgresStore) ReplaceSalesHistorySnapshot(ctx context.Context, sales []history.Sale, rejected []string, source string) error {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin history replacement: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `DELETE FROM sales_history`); err != nil {
-		return fmt.Errorf("clear sales history: %w", err)
+	var snapshotID int64
+	if err := tx.QueryRow(ctx, `INSERT INTO history_snapshots (source, accepted_rows, rejected_rows) VALUES ($1,$2,$3) RETURNING id`, source, len(sales), len(rejected)).Scan(&snapshotID); err != nil {
+		return fmt.Errorf("create history snapshot: %w", err)
 	}
 	for _, sale := range sales {
-		if _, err := tx.Exec(ctx, `INSERT INTO sales_history (model, size, condition, purchase_price_cents, sale_price_cents, costs_cents, purchased_at, sold_at, source) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, sale.Model, sale.Size, sale.Condition, sale.PurchaseCents, sale.SaleCents, sale.CostsCents, sale.PurchasedAt, sale.SoldAt, sale.Source); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO sales_history (snapshot_id, source_row, model, original_model, brand, normalized_model, size, normalized_size, condition, normalized_condition, purchase_price_cents, sale_price_cents, costs_cents, purchased_at, sold_at, days_to_sell, source) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`, snapshotID, nullableSourceRow(sale.SourceRow), sale.Model, sale.OriginalModel, sale.Brand, sale.NormalizedModel, sale.Size, sale.NormalizedSize, sale.Condition, sale.NormalizedCondition, sale.PurchaseCents, sale.SaleCents, sale.CostsCents, sale.PurchasedAt, sale.SoldAt, sale.DaysToSell, sale.Source); err != nil {
 			return fmt.Errorf("insert sales history: %w", err)
 		}
 	}
@@ -203,6 +243,13 @@ func (s *PostgresStore) ReplaceSalesHistory(ctx context.Context, sales []history
 		return fmt.Errorf("commit history replacement: %w", err)
 	}
 	return nil
+}
+
+func nullableSourceRow(value int) any {
+	if value == 0 {
+		return nil
+	}
+	return value
 }
 
 type searchRow interface {
@@ -259,6 +306,17 @@ func (s *PostgresStore) ensureMVPListingSchema(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS notification_deliveries (id BIGSERIAL PRIMARY KEY, listing_id BIGINT NOT NULL REFERENCES listings(id) ON DELETE CASCADE, channel TEXT NOT NULL, attempted_at TIMESTAMPTZ NOT NULL DEFAULT now(), succeeded BOOLEAN NOT NULL, error TEXT NOT NULL DEFAULT '')`,
 		`CREATE INDEX IF NOT EXISTS listings_first_seen_idx ON listings (first_seen_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS notification_deliveries_attempted_idx ON notification_deliveries (attempted_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS history_snapshots (id BIGSERIAL PRIMARY KEY, source TEXT NOT NULL, synced_at TIMESTAMPTZ NOT NULL DEFAULT now(), accepted_rows INTEGER NOT NULL, rejected_rows INTEGER NOT NULL DEFAULT 0)`,
+		`ALTER TABLE sales_history ADD COLUMN IF NOT EXISTS snapshot_id BIGINT REFERENCES history_snapshots(id)`,
+		`ALTER TABLE sales_history ADD COLUMN IF NOT EXISTS source_row INTEGER`,
+		`ALTER TABLE sales_history ADD COLUMN IF NOT EXISTS original_model TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sales_history ADD COLUMN IF NOT EXISTS brand TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sales_history ADD COLUMN IF NOT EXISTS normalized_model TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sales_history ADD COLUMN IF NOT EXISTS normalized_size TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sales_history ADD COLUMN IF NOT EXISTS normalized_condition TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sales_history ADD COLUMN IF NOT EXISTS days_to_sell INTEGER`,
+		`CREATE INDEX IF NOT EXISTS sales_history_snapshot_idx ON sales_history (snapshot_id, normalized_model, normalized_size)`,
+		`CREATE TABLE IF NOT EXISTS history_source (id INTEGER PRIMARY KEY CHECK (id = 1), spreadsheet_url TEXT NOT NULL DEFAULT '', worksheet TEXT NOT NULL DEFAULT 'Sales', enabled BOOLEAN NOT NULL DEFAULT FALSE, updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), last_sync_at TIMESTAMPTZ, last_error TEXT NOT NULL DEFAULT '', accepted_rows INTEGER NOT NULL DEFAULT 0, rejected_rows INTEGER NOT NULL DEFAULT 0)`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.Exec(ctx, statement); err != nil {
