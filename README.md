@@ -5,11 +5,14 @@ A Go/Docker service that monitors Vinted searches and sends new-listing alerts t
 ## What is implemented
 
 - Named Vinted search management through an authenticated HTTP API.
+- A simple admin page at `/admin` for adding, editing, enabling, disabling, and deleting searches.
 - Bounded multi-search polling with a legacy environment-search fallback.
-- Redis alert deduplication (30-day TTL); raw Vinted listings are not stored in PostgreSQL.
+- Persistent normalized listing records, search attribution, and notification delivery history in PostgreSQL.
+- Redis alert deduplication with a 30-day TTL; overlapping searches notify only once.
+- Seller metadata, descriptions, original image URLs, and source-search names in Discord alerts.
 - In-memory model, size, condition, resale-price, profit, and ROI evaluation.
 - Optional read-only Google Sheets history synchronization with row validation and atomic snapshots.
-- Discord embeds with listing links, photos, and financial fields when an opportunity is evaluated.
+- Discord embeds with listing links, photos, seller metadata, source searches, and optional financial fields.
 
 ## Requirements
 
@@ -35,7 +38,7 @@ docker compose ps
 docker compose logs -f worker
 ```
 
-PostgreSQL and Redis are started by Compose. PostgreSQL stores search configuration and synchronized sales history only; Redis stores short-lived delivery claims.
+PostgreSQL and Redis are started by Compose. PostgreSQL stores search configuration, normalized listings, search attribution, notification audit records, and synchronized sales history. Redis stores short-lived delivery claims.
 
 ## Configuration
 
@@ -108,6 +111,8 @@ API_TOKEN=replace-with-a-long-random-token
 
 The API is available at `http://localhost:8080`. Search URLs must use HTTPS and a supported Vinted host.
 
+For local development, open [http://localhost:8080/admin](http://localhost:8080/admin) to manage searches and inspect recent listings. The page also shows search health, last successful checks, and recent errors. When `API_TOKEN` is set, send the bearer token with API requests; an empty token is convenient for a local-only admin page.
+
 ```bash
 export API_TOKEN=replace-with-a-long-random-token
 
@@ -135,13 +140,16 @@ curl -X DELETE -H "Authorization: Bearer $API_TOKEN" \
 
 When at least one enabled API search exists, the worker polls those searches independently. Otherwise it uses the legacy environment settings.
 
+Each polling cycle combines duplicate results by marketplace and listing ID, retains every search that found the listing, persists the record, then claims and sends one Discord notification. A failed Discord send releases the Redis claim so the listing can be retried.
+
 ## Architecture
 
-- **API:** manages named searches in PostgreSQL.
-- **Worker:** polls Vinted, evaluates the current batch in memory, and sends Discord alerts.
+- **Admin/API:** serves the authenticated search-management API and the operational admin page.
+- **Worker:** polls enabled searches independently, normalizes and deduplicates listings, persists attribution, evaluates optional enrichment, and sends Discord alerts.
 - **Redis:** suppresses duplicate deliveries.
-- **PostgreSQL:** stores search configuration and validated sales-history snapshots only.
+- **PostgreSQL:** stores search configuration, normalized listings, search attribution, notification delivery records, and validated sales-history snapshots.
 - **Google Sheets sync:** reads history periodically; it is never queried per listing.
+- **Optional evaluation:** profitability and historical analysis never gate discovery in the default `shadow` mode.
 
 ## Verification and troubleshooting
 
@@ -150,11 +158,12 @@ go test ./...
 docker compose build worker api
 docker compose ps
 docker compose logs --tail=100 worker api
+curl --max-time 3 http://localhost:8080/admin
 curl --max-time 3 http://localhost:8080/searches
 ```
 
-The project expects tests and builds to run inside Docker when Go is not installed on the host. If the worker exits immediately, check `DISCORD_WEBHOOK_URL`, `MAX_PRICE`, PostgreSQL availability, and the worker logs. If the API is unreachable, check `docker compose ps api` and its logs.
+The project expects tests and builds to run inside Docker when Go is not installed on the host. Use `docker run --rm -v "$PWD:/app" -w /app golang:1.24-alpine go test ./...` in that case. PostgreSQL migrations are applied on fresh Compose volumes, and additive MVP columns are checked at service startup for existing deployments. If the worker exits immediately, check `DISCORD_WEBHOOK_URL`, `MAX_PRICE`, PostgreSQL availability, and the worker logs. If the API is unreachable, check `docker compose ps api` and its logs.
 
 ## Data retention and safety
 
-Raw Vinted discoveries and evaluations are ephemeral. Redis deduplication expires after 30 days. Only search configuration and synchronized business-history data are durable in PostgreSQL. The bot never purchases items, messages sellers, negotiates, pays, or lists products automatically.
+Normalized listing metadata, search attribution, and notification audit records are durable in PostgreSQL. Raw marketplace payloads are not retained by the MVP. Redis deduplication expires after 30 days. The bot never purchases items, messages sellers, negotiates, pays, or lists products automatically.
