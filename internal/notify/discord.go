@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"strings"
 	"time"
@@ -31,57 +32,75 @@ func NewDiscordNotifier(webhookURL string) (*DiscordNotifier, error) {
 	}, nil
 }
 
-// SendItem posts one listing as a Discord embed.
-func (n *DiscordNotifier) SendItem(ctx context.Context, item models.Item) error {
-	return n.SendOpportunity(ctx, models.Opportunity{Item: item})
-}
-
-// SendOpportunity posts the financial evaluation and original listing images.
-func (n *DiscordNotifier) SendOpportunity(ctx context.Context, opportunity models.Opportunity) error {
+// SendListing posts one listing and any available optional enrichment as a Discord embed.
+func (n *DiscordNotifier) SendListing(ctx context.Context, opportunity models.Opportunity) error {
 	item := opportunity.Item
-	title := item.Title
-	if item.Brand != "" {
-		title = item.Brand + " | " + title
+	title := strings.TrimSpace(item.Title)
+	if flag := countryFlag(item.Seller.Country); flag != "" {
+		title = flag + " " + title
 	}
-	description := fmt.Sprintf("**Price:** %.2f %s\n[Open listing](%s)", item.Price, item.Currency, item.URL)
-	if item.Description != "" {
-		description += "\n\n" + excerpt(item.Description, 300)
-	}
-	fields := []discordField{}
+	description := ""
 	if item.Seller.Username != "" {
-		fields = append(fields, discordField{Name: "Seller", Value: item.Seller.Username, Inline: true})
+		description = fmt.Sprintf("👤 **%s**\n\n", item.Seller.Username)
+	}
+	if item.Description != "" {
+		description += excerpt(item.Description, 280) + "\n\n"
+	}
+	description += fmt.Sprintf("[See more on Vinted…](%s)", item.URL)
+	fields := []discordField{}
+	if item.UpdatedAt != nil {
+		fields = append(fields, discordField{Name: "📅 Updated", Value: relativeTime(*item.UpdatedAt), Inline: true})
+	}
+	if item.Size != "" {
+		fields = append(fields, discordField{Name: "📏 Size", Value: item.Size, Inline: true})
+	}
+	if item.Brand != "" {
+		fields = append(fields, discordField{Name: "🏷️ Brand", Value: item.Brand, Inline: true})
+	}
+	condition := item.Condition
+	if condition == "" {
+		condition = opportunity.Condition
+	}
+	if condition != "" {
+		fields = append(fields, discordField{Name: "📦 Condition", Value: condition, Inline: true})
 	}
 	if item.Seller.Rating > 0 {
-		fields = append(fields, discordField{Name: "Seller rating", Value: fmt.Sprintf("%.1f (%d reviews)", item.Seller.Rating, item.Seller.ReviewCount), Inline: true})
+		value := stars(item.Seller.Rating)
+		if item.Seller.ReviewCount > 0 {
+			value += fmt.Sprintf(" (%d)", item.Seller.ReviewCount)
+		}
+		fields = append(fields, discordField{Name: "🌟 Rating", Value: value, Inline: true})
 	}
+	price := displayMoney(item.Price, item.Currency)
 	if opportunity.ExpectedResaleCents > 0 {
+		price += " (≈ " + displayCents(opportunity.ExpectedResaleCents, item.Currency) + ")"
+	}
+	fields = append(fields, discordField{Name: "💰 Price", Value: price, Inline: true})
+	if opportunity.ExpectedProfitCents > 0 {
 		fields = append(fields,
-			discordField{Name: "Expected resale", Value: formatCents(opportunity.ExpectedResaleCents, item.Currency), Inline: true},
 			discordField{Name: "Expected profit", Value: formatCents(opportunity.ExpectedProfitCents, item.Currency), Inline: true},
 			discordField{Name: "Maximum purchase", Value: formatCents(opportunity.MaximumPurchaseCents, item.Currency), Inline: true},
 			discordField{Name: "ROI", Value: fmt.Sprintf("%.1f%%", opportunity.ROIPercent), Inline: true},
 		)
 	}
-	if opportunity.Condition != "" {
-		fields = append(fields, discordField{Name: "Condition", Value: opportunity.Condition, Inline: true})
-	}
-	if item.Size != "" {
-		fields = append(fields, discordField{Name: "Size", Value: item.Size, Inline: true})
-	}
 	if len(item.FoundBy) > 0 {
 		fields = append(fields, discordField{Name: "Found through", Value: strings.Join(item.FoundBy, ", "), Inline: false})
 	}
 	embed := discordEmbed{Title: title, URL: item.URL, Description: description, Color: 0x09B1BA, Fields: fields}
-	if item.ImageURL != "" {
-		embed.Image.URL = item.ImageURL
-	}
+	imageURLs := listingImageURLs(item)
 	payload := discordPayload{Embeds: []discordEmbed{embed}}
-	for _, imageURL := range item.ImageURLs {
-		if imageURL != "" && imageURL != item.ImageURL && len(payload.Embeds) < 10 {
-			payload.Embeds = append(payload.Embeds, discordEmbed{Image: discordImage{URL: imageURL}})
+	if len(imageURLs) > 0 {
+		if files, downloadErr := downloadImages(ctx, imageURLs, n.client); downloadErr == nil {
+			return n.postMultipart(ctx, payload, files)
 		}
 	}
+	if len(imageURLs) > 0 {
+		payload.Embeds[0].Image.URL = imageURLs[0]
+	}
+	return n.postJSON(ctx, payload)
+}
 
+func (n *DiscordNotifier) postJSON(ctx context.Context, payload discordPayload) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal Discord payload: %w", err)
@@ -92,6 +111,46 @@ func (n *DiscordNotifier) SendOpportunity(ctx context.Context, opportunity model
 		return fmt.Errorf("create Discord webhook request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	return n.do(req)
+}
+
+func (n *DiscordNotifier) postMultipart(ctx context.Context, payload discordPayload, files []discordFile) error {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	payload.Attachments = make([]discordAttachment, 0, len(files))
+	for i, file := range files {
+		payload.Attachments = append(payload.Attachments, discordAttachment{ID: i, Filename: file.Name})
+		filePart, fileErr := writer.CreateFormFile(fmt.Sprintf("files[%d]", i), file.Name)
+		if fileErr != nil {
+			return fmt.Errorf("create Discord image part: %w", fileErr)
+		}
+		if _, fileErr = filePart.Write(file.Data); fileErr != nil {
+			return fmt.Errorf("write Discord image part: %w", fileErr)
+		}
+	}
+	payloadPart, err := writer.CreateFormField("payload_json")
+	if err != nil {
+		return fmt.Errorf("create Discord payload part: %w", err)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal Discord payload: %w", err)
+	}
+	if _, err := payloadPart.Write(encoded); err != nil {
+		return fmt.Errorf("write Discord payload part: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("close Discord multipart body: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.webhookURL, &body)
+	if err != nil {
+		return fmt.Errorf("create Discord webhook request: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	return n.do(req)
+}
+
+func (n *DiscordNotifier) do(req *http.Request) error {
 
 	resp, err := n.client.Do(req)
 	if err != nil {
@@ -107,8 +166,136 @@ func (n *DiscordNotifier) SendOpportunity(ctx context.Context, opportunity model
 	return nil
 }
 
+func countryFlag(country string) string {
+	country = strings.TrimSpace(country)
+	if len([]rune(country)) == 2 {
+		letters := []rune(strings.ToUpper(country))
+		if letters[0] >= 'A' && letters[0] <= 'Z' && letters[1] >= 'A' && letters[1] <= 'Z' {
+			return string([]rune{0x1F1E6 + letters[0] - 'A', 0x1F1E6 + letters[1] - 'A'})
+		}
+	}
+	switch strings.ToLower(country) {
+	case "france":
+		return "🇫🇷"
+	case "germany", "deutschland":
+		return "🇩🇪"
+	case "netherlands", "the netherlands":
+		return "🇳🇱"
+	case "belgium":
+		return "🇧🇪"
+	default:
+		return ""
+	}
+}
+
+func relativeTime(value time.Time) string {
+	age := time.Since(value)
+	if age < 0 {
+		return "just now"
+	}
+	switch {
+	case age < time.Minute:
+		return "just now"
+	case age < time.Hour:
+		minutes := int(age / time.Minute)
+		return fmt.Sprintf("%d minute%s ago", minutes, pluralSuffix(minutes))
+	case age < 24*time.Hour:
+		hours := int(age / time.Hour)
+		return fmt.Sprintf("%d hour%s ago", hours, pluralSuffix(hours))
+	default:
+		days := int(age / (24 * time.Hour))
+		return fmt.Sprintf("%d day%s ago", days, pluralSuffix(days))
+	}
+}
+
+func pluralSuffix(value int) string {
+	if value == 1 {
+		return ""
+	}
+	return "s"
+}
+
+func stars(rating float64) string {
+	count := int(rating + 0.5)
+	if count < 1 {
+		count = 1
+	}
+	if count > 5 {
+		count = 5
+	}
+	return strings.Repeat("⭐️", count)
+}
+
+func displayCents(cents int64, currency string) string {
+	return displayMoney(float64(cents)/100, currency)
+}
+
+func displayMoney(amount float64, currency string) string {
+	symbol := map[string]string{"EUR": "€", "GBP": "£", "USD": "$"}[strings.ToUpper(strings.TrimSpace(currency))]
+	if symbol == "" {
+		symbol = strings.TrimSpace(currency)
+	}
+	return fmt.Sprintf("%.2f %s", amount, symbol)
+}
+
+func listingImageURLs(item models.Item) []string {
+	urls := make([]string, 0, 3)
+	seen := make(map[string]struct{}, 3)
+	for _, imageURL := range append([]string{item.ImageURL}, item.ImageURLs...) {
+		imageURL = strings.TrimSpace(imageURL)
+		if imageURL == "" {
+			continue
+		}
+		if _, ok := seen[imageURL]; ok {
+			continue
+		}
+		seen[imageURL] = struct{}{}
+		urls = append(urls, imageURL)
+		if len(urls) == 3 {
+			break
+		}
+	}
+	return urls
+}
+
+type discordFile struct {
+	Name string
+	Data []byte
+}
+
+func downloadImages(ctx context.Context, imageURLs []string, client *http.Client) ([]discordFile, error) {
+	files := make([]discordFile, 0, len(imageURLs))
+	for i, imageURL := range imageURLs {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, imageURL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("create image request: %w", err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("download image: %w", err)
+		}
+		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+			resp.Body.Close()
+			return nil, fmt.Errorf("image returned %s", resp.Status)
+		}
+		data, readErr := io.ReadAll(io.LimitReader(resp.Body, 12<<20))
+		resp.Body.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("read image: %w", readErr)
+		}
+		files = append(files, discordFile{Name: fmt.Sprintf("vinted-photo-%d.jpg", i+1), Data: data})
+	}
+	return files, nil
+}
+
 type discordPayload struct {
-	Embeds []discordEmbed `json:"embeds"`
+	Embeds      []discordEmbed      `json:"embeds"`
+	Attachments []discordAttachment `json:"attachments,omitempty"`
+}
+
+type discordAttachment struct {
+	ID       int    `json:"id"`
+	Filename string `json:"filename"`
 }
 
 type discordEmbed struct {
