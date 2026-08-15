@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/2spy/vinted-discord-bot/pkg/models"
 )
@@ -21,17 +22,21 @@ func TestSendListingIncludesFinancialFieldsAndImages(t *testing.T) {
 	}))
 	defer server.Close()
 	notifier := &DiscordNotifier{webhookURL: server.URL, client: server.Client()}
+	updated := time.Now().Add(-30 * time.Minute)
 	err := notifier.SendListing(context.Background(), models.Opportunity{
-		Item:                models.Item{Brand: "Nike", Title: "P-6000", URL: "https://vinted.test/item", Price: 15, Currency: "EUR", Size: "42", ImageURL: "https://img.test/1", ImageURLs: []string{"https://img.test/1", "https://img.test/2"}},
+		Item:                models.Item{Brand: "Nike", Title: "P-6000", URL: "https://vinted.test/item", Price: 15, Currency: "EUR", Size: "42", Description: "Aucun défaut", UpdatedAt: &updated, Seller: models.Seller{Username: "jennajfr", Country: "FR", Rating: 5, ReviewCount: 5}, ImageURL: "https://img.test/1", ImageURLs: []string{"https://img.test/1", "https://img.test/2"}},
 		ExpectedResaleCents: 3500, ExpectedProfitCents: 2000, MaximumPurchaseCents: 2200, ROIPercent: 133.3, Condition: "good",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"💰 Price", "35.00 €", "Expected profit", "20.00 EUR", "https://img.test/1"} {
+	for _, expected := range []string{"🇫🇷 P-6000", "👤 **jennajfr**", "Aucun défaut", "See more on Vinted", "📅 Updated", "30 minutes ago", "📏 Size", "🏷️ Brand", "📦 Condition", "🌟 Rating", "⭐️⭐️⭐️⭐️⭐️ (5)", "💰 Price", "35.00 €", "https://img.test/1"} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("payload missing %q: %s", expected, body)
 		}
+	}
+	if strings.Contains(body, "Expected profit") {
+		t.Fatal("notification should keep the main card focused on the listing details")
 	}
 }
 

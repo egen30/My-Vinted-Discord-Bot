@@ -49,43 +49,33 @@ func (n *DiscordNotifier) SendListing(ctx context.Context, opportunity models.Op
 	description += fmt.Sprintf("[See more on Vinted…](%s)", item.URL)
 	fields := []discordField{}
 	if item.UpdatedAt != nil {
-		fields = append(fields, discordField{Name: "📅 Updated", Value: relativeTime(*item.UpdatedAt), Inline: true})
+		fields = append(fields, discordField{Name: "📅 Updated", Value: relativeTime(*item.UpdatedAt), Inline: false})
 	}
 	if item.Size != "" {
-		fields = append(fields, discordField{Name: "📏 Size", Value: item.Size, Inline: true})
+		fields = append(fields, discordField{Name: "📏 Size", Value: item.Size, Inline: false})
 	}
 	if item.Brand != "" {
-		fields = append(fields, discordField{Name: "🏷️ Brand", Value: item.Brand, Inline: true})
+		fields = append(fields, discordField{Name: "🏷️ Brand", Value: item.Brand, Inline: false})
 	}
 	condition := item.Condition
 	if condition == "" {
 		condition = opportunity.Condition
 	}
 	if condition != "" {
-		fields = append(fields, discordField{Name: "📦 Condition", Value: condition, Inline: true})
+		fields = append(fields, discordField{Name: "📦 Condition", Value: condition, Inline: false})
 	}
 	if item.Seller.Rating > 0 {
 		value := stars(item.Seller.Rating)
 		if item.Seller.ReviewCount > 0 {
 			value += fmt.Sprintf(" (%d)", item.Seller.ReviewCount)
 		}
-		fields = append(fields, discordField{Name: "🌟 Rating", Value: value, Inline: true})
+		fields = append(fields, discordField{Name: "🌟 Rating", Value: value, Inline: false})
 	}
 	price := displayMoney(item.Price, item.Currency)
 	if opportunity.ExpectedResaleCents > 0 {
 		price += " (≈ " + displayCents(opportunity.ExpectedResaleCents, item.Currency) + ")"
 	}
-	fields = append(fields, discordField{Name: "💰 Price", Value: price, Inline: true})
-	if opportunity.ExpectedProfitCents > 0 {
-		fields = append(fields,
-			discordField{Name: "Expected profit", Value: formatCents(opportunity.ExpectedProfitCents, item.Currency), Inline: true},
-			discordField{Name: "Maximum purchase", Value: formatCents(opportunity.MaximumPurchaseCents, item.Currency), Inline: true},
-			discordField{Name: "ROI", Value: fmt.Sprintf("%.1f%%", opportunity.ROIPercent), Inline: true},
-		)
-	}
-	if len(item.FoundBy) > 0 {
-		fields = append(fields, discordField{Name: "Found through", Value: strings.Join(item.FoundBy, ", "), Inline: false})
-	}
+	fields = append(fields, discordField{Name: "💰 Price", Value: price, Inline: false})
 	embed := discordEmbed{Title: title, URL: item.URL, Description: description, Color: 0x09B1BA, Fields: fields}
 	imageURLs := listingImageURLs(item)
 	payload := discordPayload{Embeds: []discordEmbed{embed}}
@@ -315,10 +305,6 @@ type discordField struct {
 
 type discordImage struct {
 	URL string `json:"url,omitempty"`
-}
-
-func formatCents(cents int64, currency string) string {
-	return fmt.Sprintf("%.2f %s", float64(cents)/100, currency)
 }
 
 func excerpt(value string, maxLength int) string {
