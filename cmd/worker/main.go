@@ -62,20 +62,6 @@ func main() {
 			logger.Info("Google Sheets history synchronized", zap.Int("accepted_rows", len(snapshot.Sales)), zap.Int("rejected_rows", len(snapshot.Rejected)))
 		}
 	}
-	lastHistorySync := time.Time{}
-	syncHistory := func() {
-		if historySyncer == nil || (!lastHistorySync.IsZero() && time.Since(lastHistorySync) < config.historySyncInterval) {
-			return
-		}
-		snapshot, syncErr := historySyncer.Sync(context.Background())
-		lastHistorySync = time.Now()
-		if syncErr != nil {
-			logger.Error("Google Sheets sync failed; retaining last good pricing snapshot", zap.Error(syncErr))
-			return
-		}
-		salesHistory = snapshot.Sales
-		logger.Info("Google Sheets history synchronized", zap.Int("accepted_rows", len(snapshot.Sales)), zap.Int("rejected_rows", len(snapshot.Rejected)))
-	}
 
 	notifier, err := notify.NewDiscordNotifier(config.webhookURL)
 	if err != nil {
@@ -106,6 +92,25 @@ func main() {
 		Currency:   config.currency,
 		MinPrice:   config.minPrice,
 		MaxPrice:   config.maxPrice,
+	}
+	lastHistorySync := time.Time{}
+	syncHistory := func() {
+		if historySyncer == nil || (!lastHistorySync.IsZero() && time.Since(lastHistorySync) < config.historySyncInterval) {
+			return
+		}
+		snapshot, syncErr := historySyncer.Sync(context.Background())
+		lastHistorySync = time.Now()
+		if syncErr != nil {
+			logger.Error("Google Sheets sync failed; retaining last good pricing snapshot", zap.Error(syncErr))
+			return
+		}
+		salesHistory = snapshot.Sales
+		if listingStore != nil {
+			if persistErr := listingStore.ReplaceSalesHistory(context.Background(), salesHistory); persistErr != nil {
+				logger.Error("Could not publish Google Sheets history to PostgreSQL", zap.Error(persistErr))
+			}
+		}
+		logger.Info("Google Sheets history synchronized", zap.Int("accepted_rows", len(snapshot.Sales)), zap.Int("rejected_rows", len(snapshot.Rejected)))
 	}
 
 	processItems := func(items []models.Item) {

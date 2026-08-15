@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/2spy/vinted-discord-bot/pkg/history"
 	"github.com/2spy/vinted-discord-bot/pkg/models"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -84,6 +85,28 @@ func (s *PostgresStore) RecordSearchAttempt(ctx context.Context, id int64, runEr
 	}
 	_, err := s.db.Exec(ctx, `UPDATE searches SET last_attempted_at = now(), last_error = $2 WHERE id = $1`, id, runErr.Error())
 	return err
+}
+
+// ReplaceSalesHistory atomically publishes the latest validated sheet snapshot.
+// It intentionally stores only business history, never raw Vinted discoveries.
+func (s *PostgresStore) ReplaceSalesHistory(ctx context.Context, sales []history.Sale) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin history replacement: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `DELETE FROM sales_history`); err != nil {
+		return fmt.Errorf("clear sales history: %w", err)
+	}
+	for _, sale := range sales {
+		if _, err := tx.Exec(ctx, `INSERT INTO sales_history (model, size, condition, purchase_price_cents, sale_price_cents, costs_cents, purchased_at, sold_at, source) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, sale.Model, sale.Size, sale.Condition, sale.PurchaseCents, sale.SaleCents, sale.CostsCents, sale.PurchasedAt, sale.SoldAt, sale.Source); err != nil {
+			return fmt.Errorf("insert sales history: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit history replacement: %w", err)
+	}
+	return nil
 }
 
 type searchRow interface {
