@@ -21,12 +21,63 @@ type VintedScraper struct {
 	client httpClient
 }
 
+// JobFromSearchURL converts a user-managed Vinted URL into the existing API job.
+func JobFromSearchURL(rawURL string) (models.ScrapeJob, error) {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Scheme != "https" || !supportedHost(parsed.Hostname()) {
+		return models.ScrapeJob{}, fmt.Errorf("unsupported Vinted search URL")
+	}
+	query := parsed.Query()
+	job := models.ScrapeJob{
+		Domain:     parsed.Scheme + "://" + parsed.Host,
+		Query:      query.Get("search_text"),
+		CatalogIDs: splitQueryIDs(query, "catalog_ids", "catalog[]"),
+		SizeIDs:    splitQueryIDs(query, "size_ids", "size[]"),
+		BrandIDs:   splitQueryIDs(query, "brand_ids", "brand_ids[]"),
+		Currency:   query.Get("currency"),
+	}
+	if job.Currency == "" {
+		job.Currency = "EUR"
+	}
+	if value := query.Get("price_from"); value != "" {
+		job.MinPrice, err = strconv.Atoi(value)
+		if err != nil || job.MinPrice < 0 {
+			return models.ScrapeJob{}, fmt.Errorf("invalid price_from")
+		}
+	}
+	if value := query.Get("price_to"); value != "" {
+		job.MaxPrice, err = strconv.Atoi(value)
+		if err != nil || job.MaxPrice < 0 {
+			return models.ScrapeJob{}, fmt.Errorf("invalid price_to")
+		}
+	}
+	return job, nil
+}
+
+func supportedHost(host string) bool {
+	return host == "vinted.de" || strings.HasSuffix(host, ".vinted.de") || host == "vinted.fr" || strings.HasSuffix(host, ".vinted.fr")
+}
+
+func splitQueryIDs(query url.Values, names ...string) []string {
+	var result []string
+	for _, name := range names {
+		for _, value := range query[name] {
+			for _, id := range strings.Split(value, ",") {
+				if id = strings.TrimSpace(id); id != "" {
+					result = append(result, id)
+				}
+			}
+		}
+	}
+	return result
+}
+
 type httpClient interface {
 	Do(*http.Request) (*http.Response, error)
 }
 
 const (
-	maxResponseBytes = 8 << 20
+	maxResponseBytes   = 8 << 20
 	maxRequestAttempts = 3
 )
 
@@ -167,14 +218,14 @@ func (s *VintedScraper) Search(ctx context.Context, job models.ScrapeJob) ([]mod
 }
 
 func imageURLs(photos []struct {
-	ID                  int64       `json:"id"`
-	ImageNo             int         `json:"image_no"`
-	Width               int         `json:"width"`
-	Height              int         `json:"height"`
-	DominantColor       string      `json:"dominant_color"`
-	DominantColorOpaque string      `json:"dominant_color_opaque"`
-	URL                 string      `json:"url"`
-	IsMain              bool        `json:"is_main"`
+	ID                  int64  `json:"id"`
+	ImageNo             int    `json:"image_no"`
+	Width               int    `json:"width"`
+	Height              int    `json:"height"`
+	DominantColor       string `json:"dominant_color"`
+	DominantColorOpaque string `json:"dominant_color_opaque"`
+	URL                 string `json:"url"`
+	IsMain              bool   `json:"is_main"`
 	Thumbnails          []struct {
 		Type         string      `json:"type"`
 		URL          string      `json:"url"`
@@ -187,9 +238,9 @@ func imageURLs(photos []struct {
 		Timestamp   int         `json:"timestamp"`
 		Orientation interface{} `json:"orientation"`
 	} `json:"high_resolution"`
-	IsSuspicious bool   `json:"is_suspicious"`
-	FullSizeURL  string `json:"full_size_url"`
-	IsHidden     bool   `json:"is_hidden"`
+	IsSuspicious bool     `json:"is_suspicious"`
+	FullSizeURL  string   `json:"full_size_url"`
+	IsHidden     bool     `json:"is_hidden"`
 	Extra        struct{} `json:"extra"`
 }, primary string) []string {
 	urls := make([]string, 0, len(photos)+1)

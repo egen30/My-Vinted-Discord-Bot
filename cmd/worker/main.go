@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/2spy/vinted-discord-bot/internal/notify"
+	"github.com/2spy/vinted-discord-bot/internal/scheduler"
 	"github.com/2spy/vinted-discord-bot/internal/scrapers/vinted"
 	"github.com/2spy/vinted-discord-bot/internal/store"
 	"github.com/2spy/vinted-discord-bot/pkg/logger"
@@ -62,13 +63,7 @@ func main() {
 		MaxPrice:   config.maxPrice,
 	}
 
-	run := func() {
-		items, err := scraper.Search(ctx, job)
-		if err != nil {
-			logger.Error("Vinted search failed", zap.Error(err))
-			return
-		}
-
+	processItems := func(items []models.Item) {
 		for _, item := range items {
 			if item.Price < float64(config.minPrice) || item.Price > float64(config.maxPrice) {
 				continue
@@ -101,6 +96,41 @@ func main() {
 		}
 	}
 
+	run := func() {
+		if listingStore != nil {
+			searches, err := listingStore.ListSearches(ctx, true)
+			if err != nil {
+				logger.Error("Could not load enabled searches", zap.Error(err))
+				return
+			}
+			if len(searches) > 0 {
+				err = scheduler.RunOnce(ctx, searches, config.searchConcurrency, func(searchCtx context.Context, search models.Search) error {
+					searchJob, parseErr := vinted.JobFromSearchURL(search.URL)
+					if parseErr != nil {
+						return parseErr
+					}
+					searchJob.SearchName = search.Name
+					items, searchErr := scraper.Search(searchCtx, searchJob)
+					if searchErr != nil {
+						return searchErr
+					}
+					processItems(items)
+					return nil
+				})
+				if err != nil {
+					logger.Error("One or more Vinted searches failed", zap.Error(err))
+				}
+				return
+			}
+		}
+		items, err := scraper.Search(ctx, job)
+		if err != nil {
+			logger.Error("Vinted search failed", zap.Error(err))
+			return
+		}
+		processItems(items)
+	}
+
 	logger.Info("Worker started", zap.String("query", config.searchQuery), zap.Int("max_price", config.maxPrice), zap.Duration("interval", config.interval))
 	run()
 	ticker := time.NewTicker(config.interval)
@@ -117,18 +147,19 @@ func main() {
 }
 
 type config struct {
-	webhookURL    string
-	searchQuery   string
-	vintedBaseURL string
-	catalogIDs    []string
-	sizeIDs       []string
-	brandIDs      []string
-	currency      string
-	minPrice      int
-	maxPrice      int
-	interval      time.Duration
-	redisAddress  string
-	databaseURL   string
+	webhookURL        string
+	searchQuery       string
+	vintedBaseURL     string
+	catalogIDs        []string
+	sizeIDs           []string
+	brandIDs          []string
+	currency          string
+	minPrice          int
+	maxPrice          int
+	interval          time.Duration
+	redisAddress      string
+	databaseURL       string
+	searchConcurrency int
 }
 
 func loadConfig() (config, error) {
@@ -155,19 +186,32 @@ func loadConfig() (config, error) {
 		redisAddress = "localhost:6379"
 	}
 	return config{
-		webhookURL:    strings.TrimSpace(os.Getenv("DISCORD_WEBHOOK_URL")),
-		searchQuery:   strings.TrimSpace(os.Getenv("SEARCH_QUERY")),
-		vintedBaseURL: strings.TrimSpace(os.Getenv("VINTED_BASE_URL")),
-		catalogIDs:    splitIDs(os.Getenv("CATALOG_IDS")),
-		sizeIDs:       splitIDs(os.Getenv("SIZE_IDS")),
-		brandIDs:      splitIDs(os.Getenv("BRAND_IDS")),
-		currency:      strings.TrimSpace(os.Getenv("CURRENCY")),
-		minPrice:      minPrice,
-		maxPrice:      maxPrice,
-		interval:      time.Duration(rateMS) * time.Millisecond,
-		redisAddress:  redisAddress,
-		databaseURL:   strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		webhookURL:        strings.TrimSpace(os.Getenv("DISCORD_WEBHOOK_URL")),
+		searchQuery:       strings.TrimSpace(os.Getenv("SEARCH_QUERY")),
+		vintedBaseURL:     strings.TrimSpace(os.Getenv("VINTED_BASE_URL")),
+		catalogIDs:        splitIDs(os.Getenv("CATALOG_IDS")),
+		sizeIDs:           splitIDs(os.Getenv("SIZE_IDS")),
+		brandIDs:          splitIDs(os.Getenv("BRAND_IDS")),
+		currency:          strings.TrimSpace(os.Getenv("CURRENCY")),
+		minPrice:          minPrice,
+		maxPrice:          maxPrice,
+		interval:          time.Duration(rateMS) * time.Millisecond,
+		redisAddress:      redisAddress,
+		databaseURL:       strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		searchConcurrency: parsePositiveEnv("SEARCH_CONCURRENCY", 2),
 	}, nil
+}
+
+func parsePositiveEnv(name string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 1 {
+		return fallback
+	}
+	return parsed
 }
 
 func waitForNextNotification(ctx context.Context) bool {

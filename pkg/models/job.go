@@ -2,6 +2,7 @@ package models
 
 type ScrapeJob struct {
 	ID          string   `json:"id"`
+	SearchName  string   `json:"search_name"`
 	Query       string   `json:"query"`
 	Domain      string   `json:"domain"`
 	CatalogIDs  []string `json:"catalog_ids"`
