@@ -12,7 +12,7 @@ COPY . .
 # Build the worker binary
 # CGO_ENABLED=0 for static binary (no libc dependency issues)
 RUN CGO_ENABLED=0 GOOS=linux go build -o /app/worker ./cmd/worker/main.go
-RUN CGO_ENABLED=0 GOOS=linux go build -o /app/api ./cmd/api/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -o /app/api-bin ./cmd/api/main.go
 
 # Final Stage
 FROM alpine:latest
@@ -23,5 +23,5 @@ WORKDIR /app
 RUN apk --no-cache add ca-certificates tzdata
 
 COPY --from=builder /app/worker .
-COPY --from=builder /app/api .
+COPY --from=builder /app/api-bin ./api
 CMD ["./worker"]
