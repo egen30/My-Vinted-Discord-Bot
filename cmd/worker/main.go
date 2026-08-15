@@ -7,7 +7,6 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -16,6 +15,7 @@ import (
 	"github.com/2spy/vinted-discord-bot/internal/scheduler"
 	"github.com/2spy/vinted-discord-bot/internal/scrapers/vinted"
 	"github.com/2spy/vinted-discord-bot/internal/store"
+	"github.com/2spy/vinted-discord-bot/pkg/discovery"
 	"github.com/2spy/vinted-discord-bot/pkg/evaluation"
 	"github.com/2spy/vinted-discord-bot/pkg/history"
 	"github.com/2spy/vinted-discord-bot/pkg/logger"
@@ -114,21 +114,17 @@ func main() {
 		logger.Info("Google Sheets history synchronized", zap.Int("accepted_rows", len(snapshot.Sales)), zap.Int("rejected_rows", len(snapshot.Rejected)))
 	}
 
-	type discoveredListing struct {
-		item      models.Item
-		searchIDs []int64
-	}
-	processItems := func(entries []discoveredListing) {
+	processItems := func(entries []discovery.Listing) {
 		for _, entry := range entries {
-			item := entry.item
+			item := entry.Item
 			var listingID int64
-			if listingStore != nil && len(entry.searchIDs) > 0 {
+			if listingStore != nil && len(entry.SearchIDs) > 0 {
 				var persistErr error
-				listingID, persistErr = listingStore.UpsertListing(ctx, item, entry.searchIDs[0])
+				listingID, persistErr = listingStore.UpsertListing(ctx, item, entry.SearchIDs[0])
 				if persistErr != nil {
 					logger.Error("Could not persist listing; continuing notification", zap.String("item_id", item.ID), zap.Error(persistErr))
 				} else {
-					for _, searchID := range entry.searchIDs[1:] {
+					for _, searchID := range entry.SearchIDs[1:] {
 						if _, attributionErr := listingStore.UpsertListing(ctx, item, searchID); attributionErr != nil {
 							logger.Error("Could not persist listing attribution", zap.String("item_id", item.ID), zap.Error(attributionErr))
 						}
@@ -198,8 +194,7 @@ func main() {
 				return
 			}
 			if len(searches) > 0 {
-				var mu sync.Mutex
-				byID := make(map[string]*discoveredListing)
+				batch := discovery.NewBatch()
 				err = scheduler.RunOnce(ctx, searches, config.searchConcurrency, func(searchCtx context.Context, search models.Search) error {
 					searchJob, parseErr := vinted.JobFromSearchURL(search.URL)
 					if parseErr != nil {
@@ -213,27 +208,13 @@ func main() {
 						return searchErr
 					}
 					_ = listingStore.RecordSearchAttempt(context.Background(), search.ID, nil)
-					mu.Lock()
-					for _, item := range items {
-						entry := byID[item.ID]
-						if entry == nil {
-							entry = &discoveredListing{item: item}
-							byID[item.ID] = entry
-						}
-						if !containsSearchID(entry.searchIDs, search.ID) {
-							entry.searchIDs = append(entry.searchIDs, search.ID)
-							entry.item.FoundBy = append(entry.item.FoundBy, search.Name)
-						}
-					}
-					mu.Unlock()
+					batch.Add(search, items)
 					return nil
 				})
 				if err != nil {
 					logger.Error("One or more Vinted searches failed", zap.Error(err))
 				}
-				entries := make([]discoveredListing, 0, len(byID))
-				for _, entry := range byID { entries = append(entries, *entry) }
-				processItems(entries)
+				processItems(batch.Listings())
 				return
 			}
 		}
@@ -242,8 +223,10 @@ func main() {
 			logger.Error("Vinted search failed", zap.Error(err))
 			return
 		}
-		entries := make([]discoveredListing, 0, len(items))
-		for _, item := range items { entries = append(entries, discoveredListing{item: item}) }
+		entries := make([]discovery.Listing, 0, len(items))
+		for _, item := range items {
+			entries = append(entries, discovery.Listing{Item: item})
+		}
 		processItems(entries)
 	}
 
@@ -370,11 +353,4 @@ func splitIDs(value string) []string {
 		}
 	}
 	return ids
-}
-
-func containsSearchID(ids []int64, wanted int64) bool {
-	for _, id := range ids {
-		if id == wanted { return true }
-	}
-	return false
 }

@@ -213,10 +213,10 @@ func (s *VintedScraper) Search(ctx context.Context, job models.ScrapeJob) ([]mod
 			ImageURLs: imageURLs(item.Photos, item.Photo.URL),
 			Platform:  "vinted",
 			Seller: models.Seller{
-				Username: item.User.Login,
-				ProfileURL: item.User.ProfileURL,
-				AvatarURL: item.User.Photo.URL,
-				Rating: item.User.Feedback.Score,
+				Username:    item.User.Login,
+				ProfileURL:  item.User.ProfileURL,
+				AvatarURL:   item.User.Photo.URL,
+				Rating:      item.User.Feedback.Score,
 				ReviewCount: item.User.Feedback.Count,
 			},
 		})

@@ -136,6 +136,8 @@ func formatCents(cents int64, currency string) string {
 
 func excerpt(value string, maxLength int) string {
 	value = strings.TrimSpace(value)
-	if len(value) <= maxLength { return value }
+	if len(value) <= maxLength {
+		return value
+	}
 	return value[:maxLength-1] + "…"
 }

@@ -77,9 +77,15 @@ type adminPageData struct {
 
 func (h *searchHandler) adminPage(w http.ResponseWriter, r *http.Request) {
 	searches, err := h.store.ListSearches(r.Context(), false)
-	if err != nil { http.Error(w, "could not load searches", http.StatusInternalServerError); return }
+	if err != nil {
+		http.Error(w, "could not load searches", http.StatusInternalServerError)
+		return
+	}
 	listings, err := h.store.RecentListings(r.Context(), 50)
-	if err != nil { http.Error(w, "could not load listings", http.StatusInternalServerError); return }
+	if err != nil {
+		http.Error(w, "could not load listings", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := adminTemplate.Execute(w, adminPageData{Searches: searches, Listings: listings}); err != nil {
 		// The response may already have started; logging is intentionally omitted
@@ -91,27 +97,64 @@ func (h *searchHandler) adminPage(w http.ResponseWriter, r *http.Request) {
 func (h *searchHandler) createFromForm(w http.ResponseWriter, r *http.Request) {
 	priority, _ := strconv.Atoi(r.FormValue("priority"))
 	input := models.Search{Name: strings.TrimSpace(r.FormValue("name")), URL: strings.TrimSpace(r.FormValue("url")), Notes: strings.TrimSpace(r.FormValue("notes")), Priority: priority, Enabled: r.FormValue("enabled") == "on"}
-	if err := validateSearch(input); err != nil { http.Error(w, err.Error(), http.StatusBadRequest); return }
-	if _, err := h.store.CreateSearch(r.Context(), input); err != nil { http.Error(w, err.Error(), http.StatusConflict); return }
+	if err := validateSearch(input); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if _, err := h.store.CreateSearch(r.Context(), input); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
 	h.redirectAdmin(w, r)
 }
 
 func (h *searchHandler) adminAction(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/admin/searches/"), "/")
-	if len(parts) != 2 { http.NotFound(w, r); return }
+	if len(parts) != 2 {
+		http.NotFound(w, r)
+		return
+	}
 	id, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil { http.Error(w, "invalid search ID", http.StatusBadRequest); return }
+	if err != nil {
+		http.Error(w, "invalid search ID", http.StatusBadRequest)
+		return
+	}
 	switch parts[1] {
 	case "toggle":
 		searches, listErr := h.store.ListSearches(r.Context(), false)
-		if listErr != nil { http.Error(w, listErr.Error(), http.StatusInternalServerError); return }
-		for _, search := range searches { if search.ID == id { err = h.store.SetSearchEnabled(r.Context(), id, !search.Enabled); break } }
+		if listErr != nil {
+			http.Error(w, listErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		found := false
+		for _, search := range searches {
+			if search.ID == id {
+				err = h.store.SetSearchEnabled(r.Context(), id, !search.Enabled)
+				found = true
+				break
+			}
+		}
+		if !found {
+			err = fmt.Errorf("search %d not found", id)
+		}
+	case "update":
+		priority, _ := strconv.Atoi(r.FormValue("priority"))
+		input := models.Search{ID: id, Name: strings.TrimSpace(r.FormValue("name")), URL: strings.TrimSpace(r.FormValue("url")), Notes: strings.TrimSpace(r.FormValue("notes")), Priority: priority, Enabled: r.FormValue("enabled") == "on"}
+		if validationErr := validateSearch(input); validationErr != nil {
+			http.Error(w, validationErr.Error(), http.StatusBadRequest)
+			return
+		}
+		_, err = h.store.UpdateSearch(r.Context(), input)
 	case "delete":
 		err = h.store.DeleteSearch(r.Context(), id)
 	default:
-		http.NotFound(w, r); return
+		http.NotFound(w, r)
+		return
 	}
-	if err != nil { http.Error(w, err.Error(), http.StatusNotFound); return }
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
 	h.redirectAdmin(w, r)
 }
 
@@ -225,7 +268,7 @@ var adminTemplate = template.Must(template.New("admin").Funcs(template.FuncMap{"
 <style>body{font:16px system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem;color:#18202a}section{margin:2rem 0}table{border-collapse:collapse;width:100%}th,td{padding:.6rem;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}input{padding:.5rem;margin:.2rem;width:min(100%,30rem)}button{padding:.45rem .7rem}.ok{color:#087f5b}.bad{color:#c92a2a}.muted{color:#68717d;font-size:.9rem}</style></head>
 <body><h1>Vinted listing monitor</h1>
 <section><h2>Sourcing searches</h2><form method="post" action="/admin/searches"><input name="name" placeholder="Search name" required><input name="url" type="url" placeholder="https://www.vinted.de/catalog?..." required><input name="priority" type="number" value="0" title="Priority"><input name="notes" placeholder="Notes"><label><input name="enabled" type="checkbox" checked> enabled</label><button>Add search</button></form>
-<table><tr><th>Status</th><th>Name</th><th>URL</th><th>Health</th><th>Actions</th></tr>{{range .Searches}}<tr><td>{{if .Enabled}}<span class="ok">Enabled</span>{{else}}<span class="muted">Disabled</span>{{end}}</td><td>{{.Name}}<br><span class="muted">priority {{.Priority}}</span></td><td><a href="{{.URL}}">{{.URL}}</a></td><td>{{if .LastError}}<span class="bad">{{.LastError}}</span>{{else if .LastSuccessfulAt}}last successful {{.LastSuccessfulAt}}{{else}}<span class="muted">not checked</span>{{end}}</td><td><form method="post" action="/admin/searches/{{.ID}}/toggle" style="display:inline"><button>{{if .Enabled}}Disable{{else}}Enable{{end}}</button></form> <form method="post" action="/admin/searches/{{.ID}}/delete" style="display:inline"><button>Delete</button></form></td></tr>{{else}}<tr><td colspan="5">No searches configured.</td></tr>{{end}}</table></section>
+<table><tr><th>Status</th><th>Edit search</th><th>Health</th><th>Actions</th></tr>{{range .Searches}}<tr><td>{{if .Enabled}}<span class="ok">Enabled</span>{{else}}<span class="muted">Disabled</span>{{end}}</td><td><form method="post" action="/admin/searches/{{.ID}}/update"><input name="name" value="{{.Name}}" required><input name="url" value="{{.URL}}" type="url" required><input name="priority" type="number" value="{{.Priority}}"><input name="notes" value="{{.Notes}}"><label><input name="enabled" type="checkbox" {{if .Enabled}}checked{{end}}> enabled</label><button>Save</button></form></td><td>{{if .LastError}}<span class="bad">{{.LastError}}</span>{{else if .LastSuccessfulAt}}last successful {{.LastSuccessfulAt}}{{else}}<span class="muted">not checked</span>{{end}}</td><td><form method="post" action="/admin/searches/{{.ID}}/toggle"><button>{{if .Enabled}}Disable{{else}}Enable{{end}}</button></form><form method="post" action="/admin/searches/{{.ID}}/delete"><button>Delete</button></form></td></tr>{{else}}<tr><td colspan="4">No searches configured.</td></tr>{{end}}</table></section>
 <section><h2>Recent listings</h2><table><tr><th>First seen</th><th>Listing</th><th>Price</th><th>Found through</th></tr>{{range .Listings}}<tr><td>{{.FirstSeenAt}}</td><td><a href="{{.URL}}">{{.Title}}</a><br><span class="muted">{{.Seller}} · {{.ExternalID}}</span></td><td>{{printf "%.2f" (div .PriceCents 100)}} {{.Currency}}</td><td>{{range .SearchNames}}{{.}}<br>{{end}}</td></tr>{{else}}<tr><td colspan="4">No listings recorded yet.</td></tr>{{end}}</table></section>
 <section><h2>Optional modules</h2><p class="muted">Historical data, profitability, image analysis, and Deal Score are optional and do not gate discovery or notifications.</p></section>
 </body></html>`))

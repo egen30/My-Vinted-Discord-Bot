@@ -136,22 +136,30 @@ ON CONFLICT (listing_id, search_id) DO UPDATE SET last_discovered_at=now(), disc
 }
 
 func nullableRating(value float64) any {
-	if value == 0 { return nil }
+	if value == 0 {
+		return nil
+	}
 	return value
 }
 
 func nullableInt(value int) any {
-	if value == 0 { return nil }
+	if value == 0 {
+		return nil
+	}
 	return value
 }
 
 func (s *PostgresStore) RecentListings(ctx context.Context, limit int) ([]models.ListingSummary, error) {
-	if limit < 1 || limit > 200 { limit = 50 }
+	if limit < 1 || limit > 200 {
+		limit = 50
+	}
 	rows, err := s.db.Query(ctx, `SELECT l.id, l.external_id, l.title, l.url, l.purchase_price_cents, l.currency,
  l.seller_username, l.first_seen_at, COALESCE(array_agg(DISTINCT se.name) FILTER (WHERE se.name IS NOT NULL), '{}')
  FROM listings l LEFT JOIN listing_searches ls ON ls.listing_id=l.id LEFT JOIN searches se ON se.id=ls.search_id
  GROUP BY l.id ORDER BY l.first_seen_at DESC LIMIT $1`, limit)
-	if err != nil { return nil, fmt.Errorf("list recent listings: %w", err) }
+	if err != nil {
+		return nil, fmt.Errorf("list recent listings: %w", err)
+	}
 	defer rows.Close()
 	var result []models.ListingSummary
 	for rows.Next() {
@@ -168,7 +176,9 @@ func (s *PostgresStore) RecentListings(ctx context.Context, limit int) ([]models
 func (s *PostgresStore) RecordNotification(ctx context.Context, listingID int64, channel string, sendErr error) error {
 	message := ""
 	succeeded := sendErr == nil
-	if sendErr != nil { message = sendErr.Error() }
+	if sendErr != nil {
+		message = sendErr.Error()
+	}
 	_, err := s.db.Exec(ctx, `INSERT INTO notification_deliveries (listing_id, channel, succeeded, error) VALUES ($1,$2,$3,$4)`, listingID, channel, succeeded, message)
 	return err
 }
