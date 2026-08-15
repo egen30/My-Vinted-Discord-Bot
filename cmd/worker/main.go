@@ -73,13 +73,6 @@ func main() {
 			if item.Price < float64(config.minPrice) || item.Price > float64(config.maxPrice) {
 				continue
 			}
-			if listingStore != nil {
-				if _, err := listingStore.UpsertListing(ctx, item); err != nil {
-					logger.Error("Could not persist listing", zap.String("item_id", item.ID), zap.Error(err))
-					continue
-				}
-			}
-
 			// Claim the item before delivering so a later poll cannot send it twice.
 			// Release the claim if Discord rejects the message, allowing a retry.
 			isNew, err := deduplicator.MarkDelivered(ctx, item.ID, deliveredItemTTL)
