@@ -9,3 +9,5 @@ CREATE TABLE IF NOT EXISTS history_source (
     accepted_rows INTEGER NOT NULL DEFAULT 0,
     rejected_rows INTEGER NOT NULL DEFAULT 0
 );
+
+INSERT INTO history_source (id) VALUES (1) ON CONFLICT (id) DO NOTHING;

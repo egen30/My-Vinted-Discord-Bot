@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -39,6 +40,22 @@ func NewGoogleSheetsSource(ctx context.Context, credentialsJSON []byte, spreadsh
 		return nil, fmt.Errorf("create Google Sheets service: %w", err)
 	}
 	return &GoogleSheetsSource{service: service, spreadsheetID: spreadsheetID, rangeName: worksheet + "!A:Z"}, nil
+}
+
+// SpreadsheetIDFromURL extracts the ID from a standard Google Sheets URL.
+// Credentials and query parameters are deliberately not part of the result.
+func SpreadsheetIDFromURL(rawURL string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() != "docs.google.com" {
+		return "", fmt.Errorf("spreadsheet URL must be an HTTPS docs.google.com URL")
+	}
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	for i := 0; i+1 < len(parts); i++ {
+		if parts[i] == "d" && strings.TrimSpace(parts[i+1]) != "" {
+			return parts[i+1], nil
+		}
+	}
+	return "", fmt.Errorf("spreadsheet URL does not contain a spreadsheet ID")
 }
 
 func (s *GoogleSheetsSource) ReadRows(ctx context.Context) ([][]string, error) {

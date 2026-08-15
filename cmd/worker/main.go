@@ -41,29 +41,6 @@ func main() {
 		logger.Error("Invalid RESALE_RULES configuration", zap.Error(err))
 		os.Exit(1)
 	}
-	var historySyncer *historysync.Syncer
-	if config.googleCredentials != "" || config.googleSheetID != "" || config.googleWorksheet != "" {
-		if config.googleCredentials == "" || config.googleSheetID == "" || config.googleWorksheet == "" {
-			logger.Error("Google Sheets configuration is incomplete; using fallback pricing")
-		} else {
-			source, sourceErr := historysync.NewGoogleSheetsSource(context.Background(), []byte(config.googleCredentials), config.googleSheetID, config.googleWorksheet)
-			if sourceErr != nil {
-				logger.Error("Could not configure Google Sheets sync", zap.Error(sourceErr))
-			} else {
-				historySyncer = historysync.New(source)
-			}
-		}
-	}
-	var salesHistory []history.Sale
-	if historySyncer != nil {
-		if snapshot, syncErr := historySyncer.Sync(context.Background()); syncErr != nil {
-			logger.Error("Initial Google Sheets sync failed; using fallback pricing", zap.Error(syncErr))
-		} else {
-			salesHistory = snapshot.Sales
-			logger.Info("Google Sheets history synchronized", zap.Int("accepted_rows", len(snapshot.Sales)), zap.Int("rejected_rows", len(snapshot.Rejected)))
-		}
-	}
-
 	notifier, err := notify.NewDiscordNotifier(config.webhookURL)
 	if err != nil {
 		logger.Error("Invalid Discord configuration", zap.Error(err))
@@ -84,6 +61,26 @@ func main() {
 		}
 		defer listingStore.Close()
 	}
+	var historySyncer *historysync.Syncer
+	var salesHistory []history.Sale
+	if listingStore != nil {
+		historySyncer = configureHistorySyncer(ctx, listingStore, config)
+	} else {
+		historySyncer = configureEnvironmentHistorySyncer(ctx, config)
+	}
+	if historySyncer != nil {
+		if snapshot, syncErr := historySyncer.Sync(context.Background()); syncErr != nil {
+			logger.Error("Initial Google Sheets sync failed; using fallback pricing", zap.Error(syncErr))
+			if listingStore != nil {
+				if recordErr := listingStore.RecordHistorySync(context.Background(), 0, 0, syncErr); recordErr != nil {
+					logger.Error("Could not record initial history sync failure", zap.Error(recordErr))
+				}
+			}
+		} else {
+			salesHistory = snapshot.Sales
+			logger.Info("Google Sheets history synchronized", zap.Int("accepted_rows", len(snapshot.Sales)), zap.Int("rejected_rows", len(snapshot.Rejected)))
+		}
+	}
 	job := models.ScrapeJob{
 		Query:      config.searchQuery,
 		Domain:     config.vintedBaseURL,
@@ -103,6 +100,11 @@ func main() {
 		lastHistorySync = time.Now()
 		if syncErr != nil {
 			logger.Error("Google Sheets sync failed; retaining last good pricing snapshot", zap.Error(syncErr))
+			if listingStore != nil {
+				if recordErr := listingStore.RecordHistorySync(context.Background(), 0, 0, syncErr); recordErr != nil {
+					logger.Error("Could not record history sync failure", zap.Error(recordErr))
+				}
+			}
 			return
 		}
 		salesHistory = snapshot.Sales
@@ -113,6 +115,9 @@ func main() {
 			}
 			if persistErr := listingStore.ReplaceSalesHistorySnapshot(context.Background(), salesHistory, rejected, "google_sheets"); persistErr != nil {
 				logger.Error("Could not publish Google Sheets history to PostgreSQL", zap.Error(persistErr))
+			}
+			if recordErr := listingStore.RecordHistorySync(context.Background(), len(snapshot.Sales), len(snapshot.Rejected), nil); recordErr != nil {
+				logger.Error("Could not record history sync result", zap.Error(recordErr))
 			}
 		}
 		logger.Info("Google Sheets history synchronized", zap.Int("accepted_rows", len(snapshot.Sales)), zap.Int("rejected_rows", len(snapshot.Rejected)))
@@ -238,6 +243,49 @@ func main() {
 			run()
 		}
 	}
+}
+
+func configureHistorySyncer(ctx context.Context, listingStore *store.PostgresStore, config config) *historysync.Syncer {
+	settings, err := listingStore.GetHistorySource(ctx)
+	if err != nil {
+		logger.Error("Could not load admin Google Sheets settings; using environment fallback", zap.Error(err))
+		return configureEnvironmentHistorySyncer(ctx, config)
+	}
+	if settings.Enabled {
+		if config.googleCredentials == "" {
+			logger.Error("Admin Google Sheets source is enabled but GOOGLE_SERVICE_ACCOUNT_JSON is missing")
+			return nil
+		}
+		spreadsheetID, parseErr := historysync.SpreadsheetIDFromURL(settings.SpreadsheetURL)
+		if parseErr != nil {
+			logger.Error("Admin Google Sheets URL is invalid", zap.Error(parseErr))
+			return nil
+		}
+		source, sourceErr := historysync.NewGoogleSheetsSource(ctx, []byte(config.googleCredentials), spreadsheetID, settings.Worksheet)
+		if sourceErr != nil {
+			logger.Error("Could not configure admin Google Sheets sync", zap.Error(sourceErr))
+			return nil
+		}
+		logger.Info("Using admin-configured Google Sheets history", zap.String("worksheet", settings.Worksheet))
+		return historysync.New(source)
+	}
+	return configureEnvironmentHistorySyncer(ctx, config)
+}
+
+func configureEnvironmentHistorySyncer(ctx context.Context, config config) *historysync.Syncer {
+	if config.googleCredentials == "" && config.googleSheetID == "" && config.googleWorksheet == "" {
+		return nil
+	}
+	if config.googleCredentials == "" || config.googleSheetID == "" || config.googleWorksheet == "" {
+		logger.Error("Google Sheets environment configuration is incomplete; using fallback pricing")
+		return nil
+	}
+	source, err := historysync.NewGoogleSheetsSource(ctx, []byte(config.googleCredentials), config.googleSheetID, config.googleWorksheet)
+	if err != nil {
+		logger.Error("Could not configure Google Sheets sync", zap.Error(err))
+		return nil
+	}
+	return historysync.New(source)
 }
 
 type config struct {

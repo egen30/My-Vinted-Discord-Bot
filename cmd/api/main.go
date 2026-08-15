@@ -284,6 +284,10 @@ func validateHistorySource(spreadsheetURL, worksheet string) error {
 	if err != nil || parsed.Scheme != "https" || parsed.Hostname() != "docs.google.com" || !strings.HasPrefix(parsed.Path, "/spreadsheets/d/") {
 		return fmt.Errorf("spreadsheet URL must be an HTTPS Google Sheets URL")
 	}
+	parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	if len(parts) < 3 || parts[0] != "spreadsheets" || parts[1] != "d" || strings.TrimSpace(parts[2]) == "" {
+		return fmt.Errorf("spreadsheet URL must include a spreadsheet ID")
+	}
 	if strings.TrimSpace(worksheet) == "" {
 		return fmt.Errorf("worksheet is required")
 	}

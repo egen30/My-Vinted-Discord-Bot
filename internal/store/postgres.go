@@ -80,6 +80,18 @@ func (s *PostgresStore) GetHistorySource(ctx context.Context) (models.HistorySou
 	return source, nil
 }
 
+func (s *PostgresStore) RecordHistorySync(ctx context.Context, accepted, rejected int, syncErr error) error {
+	lastError := ""
+	if syncErr != nil {
+		lastError = syncErr.Error()
+	}
+	_, err := s.db.Exec(ctx, `UPDATE history_source SET last_sync_at=CASE WHEN $1 = '' THEN now() ELSE last_sync_at END, last_error=$1, accepted_rows=CASE WHEN $1 = '' THEN $2 ELSE accepted_rows END, rejected_rows=CASE WHEN $1 = '' THEN $3 ELSE rejected_rows END WHERE id=1`, lastError, accepted, rejected)
+	if err != nil {
+		return fmt.Errorf("record history sync: %w", err)
+	}
+	return nil
+}
+
 func (s *PostgresStore) SaveHistorySource(ctx context.Context, source models.HistorySource) (models.HistorySource, error) {
 	const query = `INSERT INTO history_source (id, spreadsheet_url, worksheet, enabled, updated_at) VALUES (1,$1,$2,$3,now())
 ON CONFLICT (id) DO UPDATE SET spreadsheet_url=EXCLUDED.spreadsheet_url, worksheet=EXCLUDED.worksheet, enabled=EXCLUDED.enabled, updated_at=now()
@@ -317,6 +329,7 @@ func (s *PostgresStore) ensureMVPListingSchema(ctx context.Context) error {
 		`ALTER TABLE sales_history ADD COLUMN IF NOT EXISTS days_to_sell INTEGER`,
 		`CREATE INDEX IF NOT EXISTS sales_history_snapshot_idx ON sales_history (snapshot_id, normalized_model, normalized_size)`,
 		`CREATE TABLE IF NOT EXISTS history_source (id INTEGER PRIMARY KEY CHECK (id = 1), spreadsheet_url TEXT NOT NULL DEFAULT '', worksheet TEXT NOT NULL DEFAULT 'Sales', enabled BOOLEAN NOT NULL DEFAULT FALSE, updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), last_sync_at TIMESTAMPTZ, last_error TEXT NOT NULL DEFAULT '', accepted_rows INTEGER NOT NULL DEFAULT 0, rejected_rows INTEGER NOT NULL DEFAULT 0)`,
+		`INSERT INTO history_source (id) VALUES (1) ON CONFLICT (id) DO NOTHING`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.Exec(ctx, statement); err != nil {

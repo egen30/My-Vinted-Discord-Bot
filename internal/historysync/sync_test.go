@@ -32,3 +32,16 @@ func TestSyncPublishesValidRowsAndDiagnostics(t *testing.T) {
 	}
 	_ = history.Sale{}
 }
+
+func TestSpreadsheetIDFromURL(t *testing.T) {
+	got, err := SpreadsheetIDFromURL("https://docs.google.com/spreadsheets/d/sheet-123/edit#gid=0")
+	if err != nil || got != "sheet-123" {
+		t.Fatalf("unexpected spreadsheet ID: %q, %v", got, err)
+	}
+	if _, err := SpreadsheetIDFromURL("https://example.com/spreadsheets/d/sheet-123"); err == nil {
+		t.Fatal("expected non-Google URL to fail")
+	}
+	if _, err := SpreadsheetIDFromURL("https://docs.google.com/spreadsheets/d/"); err == nil {
+		t.Fatal("expected missing spreadsheet ID to fail")
+	}
+}
