@@ -1,4 +1,18 @@
 services:
+  api:
+    build: .
+    container_name: vinted-api
+    restart: always
+    command: ["./api"]
+    environment:
+      - DATABASE_URL=postgres://vinted:vinted@postgres:5432/vinted?sslmode=disable
+      - API_TOKEN=${API_TOKEN:-}
+      - API_PORT=8080
+    depends_on:
+      - postgres
+    ports:
+      - "8080:8080"
+
   worker:
     build: .
     container_name: vinted-worker
@@ -19,6 +33,7 @@ services:
     depends_on:
       - redis
       - postgres
+      - api
     # volumes:
     #   - ./logs:/app/logs
 

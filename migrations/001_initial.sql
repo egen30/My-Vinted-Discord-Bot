@@ -15,6 +15,28 @@ CREATE TABLE IF NOT EXISTS listings (
     UNIQUE (platform, external_id)
 );
 
+CREATE TABLE IF NOT EXISTS searches (
+    id BIGSERIAL PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    url TEXT NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    priority INTEGER NOT NULL DEFAULT 0,
+    notes TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_attempted_at TIMESTAMPTZ,
+    last_successful_at TIMESTAMPTZ,
+    last_error TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS listing_searches (
+    listing_id BIGINT NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+    search_id BIGINT NOT NULL REFERENCES searches(id) ON DELETE CASCADE,
+    first_discovered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_discovered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    discovery_count INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (listing_id, search_id)
+);
+
 CREATE TABLE IF NOT EXISTS sales_history (
     id BIGSERIAL PRIMARY KEY,
     model TEXT NOT NULL,

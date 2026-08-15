@@ -15,6 +15,69 @@ type PostgresStore struct {
 	db *pgxpool.Pool
 }
 
+func (s *PostgresStore) CreateSearch(ctx context.Context, search models.Search) (models.Search, error) {
+	const query = `INSERT INTO searches (name, url, enabled, priority, notes) VALUES ($1, $2, $3, $4, $5)
+RETURNING id, name, url, enabled, priority, notes, created_at, last_attempted_at, last_successful_at, last_error`
+	return scanSearch(s.db.QueryRow(ctx, query, search.Name, search.URL, search.Enabled, search.Priority, search.Notes))
+}
+
+func (s *PostgresStore) ListSearches(ctx context.Context, enabledOnly bool) ([]models.Search, error) {
+	query := `SELECT id, name, url, enabled, priority, notes, created_at, last_attempted_at, last_successful_at, last_error FROM searches`
+	if enabledOnly {
+		query += ` WHERE enabled = TRUE`
+	}
+	query += ` ORDER BY priority DESC, id ASC`
+	rows, err := s.db.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("list searches: %w", err)
+	}
+	defer rows.Close()
+	var searches []models.Search
+	for rows.Next() {
+		search, scanErr := scanSearch(rows)
+		if scanErr != nil {
+			return nil, fmt.Errorf("scan search: %w", scanErr)
+		}
+		searches = append(searches, search)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate searches: %w", err)
+	}
+	return searches, nil
+}
+
+func (s *PostgresStore) SetSearchEnabled(ctx context.Context, id int64, enabled bool) error {
+	commandTag, err := s.db.Exec(ctx, `UPDATE searches SET enabled = $1 WHERE id = $2`, enabled, id)
+	if err != nil {
+		return fmt.Errorf("update search: %w", err)
+	}
+	if commandTag.RowsAffected() != 1 {
+		return fmt.Errorf("search %d not found", id)
+	}
+	return nil
+}
+
+func (s *PostgresStore) DeleteSearch(ctx context.Context, id int64) error {
+	commandTag, err := s.db.Exec(ctx, `DELETE FROM searches WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("delete search: %w", err)
+	}
+	if commandTag.RowsAffected() != 1 {
+		return fmt.Errorf("search %d not found", id)
+	}
+	return nil
+}
+
+type searchRow interface {
+	Scan(dest ...any) error
+}
+
+func scanSearch(row searchRow) (models.Search, error) {
+	var search models.Search
+	err := row.Scan(&search.ID, &search.Name, &search.URL, &search.Enabled, &search.Priority, &search.Notes, &search.CreatedAt, &search.LastAttemptedAt, &search.LastSuccessfulAt, &search.LastError)
+	return search, err
+}
+
 func NewPostgresStore(ctx context.Context, databaseURL string) (*PostgresStore, error) {
 	if databaseURL == "" {
 		return nil, fmt.Errorf("database URL is required")
