@@ -33,32 +33,42 @@ func NewDiscordNotifier(webhookURL string) (*DiscordNotifier, error) {
 
 // SendItem posts one listing as a Discord embed.
 func (n *DiscordNotifier) SendItem(ctx context.Context, item models.Item) error {
-	payload := struct {
-		Embeds []struct {
-			Title       string `json:"title"`
-			URL         string `json:"url"`
-			Description string `json:"description"`
-			Color       int    `json:"color"`
-			Thumbnail   struct {
-				URL string `json:"url"`
-			} `json:"thumbnail"`
-		} `json:"embeds"`
-	}{Embeds: make([]struct {
-		Title       string `json:"title"`
-		URL         string `json:"url"`
-		Description string `json:"description"`
-		Color       int    `json:"color"`
-		Thumbnail   struct {
-			URL string `json:"url"`
-		} `json:"thumbnail"`
-	}, 1)}
+	return n.SendOpportunity(ctx, models.Opportunity{Item: item})
+}
 
-	embed := &payload.Embeds[0]
-	embed.Title = item.Title
-	embed.URL = item.URL
-	embed.Description = fmt.Sprintf("**Price:** %.2f %s\n[Open listing](%s)", item.Price, item.Currency, item.URL)
-	embed.Color = 0x09B1BA
-	embed.Thumbnail.URL = item.ImageURL
+// SendOpportunity posts the financial evaluation and original listing images.
+func (n *DiscordNotifier) SendOpportunity(ctx context.Context, opportunity models.Opportunity) error {
+	item := opportunity.Item
+	title := item.Title
+	if item.Brand != "" {
+		title = item.Brand + " | " + title
+	}
+	description := fmt.Sprintf("**Price:** %.2f %s\n[Open listing](%s)", item.Price, item.Currency, item.URL)
+	fields := []discordField{}
+	if opportunity.ExpectedResaleCents > 0 {
+		fields = append(fields,
+			discordField{Name: "Expected resale", Value: formatCents(opportunity.ExpectedResaleCents, item.Currency), Inline: true},
+			discordField{Name: "Expected profit", Value: formatCents(opportunity.ExpectedProfitCents, item.Currency), Inline: true},
+			discordField{Name: "Maximum purchase", Value: formatCents(opportunity.MaximumPurchaseCents, item.Currency), Inline: true},
+			discordField{Name: "ROI", Value: fmt.Sprintf("%.1f%%", opportunity.ROIPercent), Inline: true},
+		)
+	}
+	if opportunity.Condition != "" {
+		fields = append(fields, discordField{Name: "Condition", Value: opportunity.Condition, Inline: true})
+	}
+	if item.Size != "" {
+		fields = append(fields, discordField{Name: "Size", Value: item.Size, Inline: true})
+	}
+	embed := discordEmbed{Title: title, URL: item.URL, Description: description, Color: 0x09B1BA, Fields: fields}
+	if item.ImageURL != "" {
+		embed.Image.URL = item.ImageURL
+	}
+	payload := discordPayload{Embeds: []discordEmbed{embed}}
+	for _, imageURL := range item.ImageURLs {
+		if imageURL != "" && imageURL != item.ImageURL && len(payload.Embeds) < 10 {
+			payload.Embeds = append(payload.Embeds, discordEmbed{Image: discordImage{URL: imageURL}})
+		}
+	}
 
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -83,4 +93,31 @@ func (n *DiscordNotifier) SendItem(ctx context.Context, item models.Item) error 
 	}
 
 	return nil
+}
+
+type discordPayload struct {
+	Embeds []discordEmbed `json:"embeds"`
+}
+
+type discordEmbed struct {
+	Title       string         `json:"title,omitempty"`
+	URL         string         `json:"url,omitempty"`
+	Description string         `json:"description,omitempty"`
+	Color       int            `json:"color,omitempty"`
+	Fields      []discordField `json:"fields,omitempty"`
+	Image       discordImage   `json:"image,omitempty"`
+}
+
+type discordField struct {
+	Name   string `json:"name"`
+	Value  string `json:"value"`
+	Inline bool   `json:"inline"`
+}
+
+type discordImage struct {
+	URL string `json:"url,omitempty"`
+}
+
+func formatCents(cents int64, currency string) string {
+	return fmt.Sprintf("%.2f %s", float64(cents)/100, currency)
 }
