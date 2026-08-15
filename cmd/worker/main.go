@@ -10,11 +10,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/2spy/vinted-discord-bot/internal/historysync"
 	"github.com/2spy/vinted-discord-bot/internal/notify"
 	"github.com/2spy/vinted-discord-bot/internal/scheduler"
 	"github.com/2spy/vinted-discord-bot/internal/scrapers/vinted"
 	"github.com/2spy/vinted-discord-bot/internal/store"
 	"github.com/2spy/vinted-discord-bot/pkg/evaluation"
+	"github.com/2spy/vinted-discord-bot/pkg/history"
 	"github.com/2spy/vinted-discord-bot/pkg/logger"
 	"github.com/2spy/vinted-discord-bot/pkg/models"
 	"github.com/2spy/vinted-discord-bot/pkg/pricing"
@@ -37,6 +39,28 @@ func main() {
 	if err != nil {
 		logger.Error("Invalid RESALE_RULES configuration", zap.Error(err))
 		os.Exit(1)
+	}
+	var historySyncer *historysync.Syncer
+	if config.googleCredentials != "" || config.googleSheetID != "" || config.googleWorksheet != "" {
+		if config.googleCredentials == "" || config.googleSheetID == "" || config.googleWorksheet == "" {
+			logger.Error("Google Sheets configuration is incomplete; using fallback pricing")
+		} else {
+			source, sourceErr := historysync.NewGoogleSheetsSource(context.Background(), []byte(config.googleCredentials), config.googleSheetID, config.googleWorksheet)
+			if sourceErr != nil {
+				logger.Error("Could not configure Google Sheets sync", zap.Error(sourceErr))
+			} else {
+				historySyncer = historysync.New(source)
+			}
+		}
+	}
+	var salesHistory []history.Sale
+	if historySyncer != nil {
+		if snapshot, syncErr := historySyncer.Sync(context.Background()); syncErr != nil {
+			logger.Error("Initial Google Sheets sync failed; using fallback pricing", zap.Error(syncErr))
+		} else {
+			salesHistory = snapshot.Sales
+			logger.Info("Google Sheets history synchronized", zap.Int("accepted_rows", len(snapshot.Sales)), zap.Int("rejected_rows", len(snapshot.Rejected)))
+		}
 	}
 
 	notifier, err := notify.NewDiscordNotifier(config.webhookURL)
@@ -79,7 +103,7 @@ func main() {
 			model, modelErr := evaluation.MatchModel(item.Brand + " " + item.Title)
 			result := evaluation.Result{Reason: "model did not match"}
 			if modelErr == nil {
-				estimate, hasEstimate := pricing.Estimator{MinimumModelData: 8, MinimumSegmentData: 5, Fallback: fallbackRules}.Estimate(model, item.Size, string(condition))
+				estimate, hasEstimate := pricing.Estimator{Sales: salesHistory, MinimumModelData: 8, MinimumSegmentData: 5, Fallback: fallbackRules}.Estimate(model, item.Size, string(condition))
 				if hasEstimate {
 					result = evaluation.Evaluate(item, evaluation.PricePolicy{ExpectedResaleCents: estimate.ExpectedCents, MinimumProfitCents: config.minimumProfitCents}, condition)
 				} else {
@@ -185,6 +209,9 @@ type config struct {
 	resaleRules        string
 	minimumProfitCents int64
 	opportunityMode    string
+	googleCredentials  string
+	googleSheetID      string
+	googleWorksheet    string
 }
 
 func loadConfig() (config, error) {
@@ -227,6 +254,9 @@ func loadConfig() (config, error) {
 		resaleRules:        strings.TrimSpace(os.Getenv("RESALE_RULES")),
 		minimumProfitCents: int64(parsePositiveEnv("MIN_PROFIT_EUR", 13)) * 100,
 		opportunityMode:    configuredOpportunityMode(),
+		googleCredentials:  strings.TrimSpace(os.Getenv("GOOGLE_SERVICE_ACCOUNT_JSON")),
+		googleSheetID:      strings.TrimSpace(os.Getenv("GOOGLE_SHEET_ID")),
+		googleWorksheet:    strings.TrimSpace(os.Getenv("GOOGLE_WORKSHEET")),
 	}, nil
 }
 
