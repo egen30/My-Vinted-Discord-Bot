@@ -42,6 +42,15 @@ func main() {
 
 	scraper := vinted.NewVintedScraper()
 	deduplicator := store.NewRedisDeduplicator(config.redisAddress)
+	var listingStore *store.PostgresStore
+	if config.databaseURL != "" {
+		listingStore, err = store.NewPostgresStore(ctx, config.databaseURL)
+		if err != nil {
+			logger.Error("PostgreSQL unavailable", zap.Error(err))
+			os.Exit(1)
+		}
+		defer listingStore.Close()
+	}
 	job := models.ScrapeJob{
 		Query:      config.searchQuery,
 		Domain:     config.vintedBaseURL,
@@ -63,6 +72,12 @@ func main() {
 		for _, item := range items {
 			if item.Price < float64(config.minPrice) || item.Price > float64(config.maxPrice) {
 				continue
+			}
+			if listingStore != nil {
+				if _, err := listingStore.UpsertListing(ctx, item); err != nil {
+					logger.Error("Could not persist listing", zap.String("item_id", item.ID), zap.Error(err))
+					continue
+				}
 			}
 
 			// Claim the item before delivering so a later poll cannot send it twice.
@@ -120,6 +135,7 @@ type config struct {
 	maxPrice      int
 	interval      time.Duration
 	redisAddress  string
+	databaseURL   string
 }
 
 func loadConfig() (config, error) {
@@ -157,6 +173,7 @@ func loadConfig() (config, error) {
 		maxPrice:      maxPrice,
 		interval:      time.Duration(rateMS) * time.Millisecond,
 		redisAddress:  redisAddress,
+		databaseURL:   strings.TrimSpace(os.Getenv("DATABASE_URL")),
 	}, nil
 }
 
