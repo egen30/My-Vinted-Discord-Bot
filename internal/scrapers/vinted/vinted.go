@@ -7,18 +7,28 @@ import (
 	"io"
 	"net/url"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/2spy/vinted-discord-bot/pkg/logger"
 	"github.com/2spy/vinted-discord-bot/pkg/models"
 	"github.com/2spy/vinted-discord-bot/pkg/stealth"
 	http "github.com/bogdanfinn/fhttp"
-	tls_client "github.com/bogdanfinn/tls-client"
 	"go.uber.org/zap"
 )
 
 type VintedScraper struct {
-	client tls_client.HttpClient
+	client httpClient
 }
+
+type httpClient interface {
+	Do(*http.Request) (*http.Response, error)
+}
+
+const (
+	maxResponseBytes = 8 << 20
+	maxRequestAttempts = 3
+)
 
 func NewVintedScraper() *VintedScraper {
 	client, err := stealth.CreateClient()
@@ -32,50 +42,82 @@ func NewVintedScraper() *VintedScraper {
 
 func (s *VintedScraper) Search(ctx context.Context, job models.ScrapeJob) ([]models.Item, error) {
 	logger.Info("Searching on Vinted", zap.String("query", job.Query))
-	encodedJobQuery := url.QueryEscape(job.Query)
 	client := s.client
-	req_init, err := http.NewRequest("GET", "https://www.vinted.fr/catalog?search_text="+encodedJobQuery, nil)
+	baseURL := job.Domain
+	if baseURL == "" {
+		baseURL = "https://www.vinted.de"
+	}
+	baseURL = strings.TrimRight(baseURL, "/")
+	initialURL, err := url.Parse(baseURL + "/catalog")
+	if err != nil {
+		return nil, fmt.Errorf("parse Vinted base URL: %w", err)
+	}
+	initialQuery := initialURL.Query()
+	initialQuery.Set("search_text", job.Query)
+	initialURL.RawQuery = initialQuery.Encode()
+	reqInit, err := http.NewRequestWithContext(ctx, "GET", initialURL.String(), nil)
 	if err != nil {
 		logger.Error("Error creating request", zap.Error(err))
 		return nil, err
 	}
-	req_init.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) Gecko/20100101 Firefox/147.0")
-	req_init.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	req_init.Header.Set("Accept-Language", "fr,fr-FR;q=0.9,en-US;q=0.8,en;q=0.7")
+	reqInit.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
+	reqInit.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	reqInit.Header.Set("Accept-Language", "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7")
 	// req.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
-	req_init.Header.Set("Connection", "keep-alive")
-	req_init.Header.Set("Referer", "https://www.vinted.fr/")
-	req_init.Header.Set("Upgrade-Insecure-Requests", "1")
-	req_init.Header.Set("Sec-Fetch-Dest", "document")
-	req_init.Header.Set("Sec-Fetch-Mode", "navigate")
-	req_init.Header.Set("Sec-Fetch-Site", "same-origin")
-	req_init.Header.Set("Sec-Fetch-User", "?1")
-	req_init.Header.Set("Priority", "u=0, i")
-	req_init.Header.Set("Pragma", "no-cache")
-	req_init.Header.Set("Cache-Control", "no-cache")
-	req_init.Header.Set("TE", "trailers")
-	resp_init, err := client.Do(req_init)
+	reqInit.Header.Set("Connection", "keep-alive")
+	reqInit.Header.Set("Referer", baseURL+"/")
+	reqInit.Header.Set("Upgrade-Insecure-Requests", "1")
+	reqInit.Header.Set("Sec-Fetch-Dest", "document")
+	reqInit.Header.Set("Sec-Fetch-Mode", "navigate")
+	reqInit.Header.Set("Sec-Fetch-Site", "same-origin")
+	reqInit.Header.Set("Sec-Fetch-User", "?1")
+	reqInit.Header.Set("Priority", "u=0, i")
+	reqInit.Header.Set("Pragma", "no-cache")
+	reqInit.Header.Set("Cache-Control", "no-cache")
+	reqInit.Header.Set("TE", "trailers")
+	respInit, err := doWithRetry(ctx, client, reqInit)
 	if err != nil {
 		logger.Error("Error making request", zap.Error(err))
 		return nil, err
 	}
-	defer resp_init.Body.Close()
-	_, err = io.ReadAll(resp_init.Body)
+	_, err = readResponseBody(respInit)
 	if err != nil {
 		logger.Error("Error reading response body", zap.Error(err))
 		return nil, err
 	}
-	req, err := http.NewRequest("GET", fmt.Sprintf("https://www.vinted.fr/api/v2/catalog/items?page=1&per_page=96&global_search_session_id=6a53863d-01f4-4af4-be77-982348a3c80d&search_text=%s&catalog_ids=&order=newest_first&size_ids=&brand_ids=&status_ids=&color_ids=&material_ids=", encodedJobQuery), nil)
+	apiURL, err := url.Parse(baseURL + "/api/v2/catalog/items")
+	if err != nil {
+		return nil, fmt.Errorf("parse Vinted API URL: %w", err)
+	}
+	apiQuery := apiURL.Query()
+	apiQuery.Set("page", "1")
+	apiQuery.Set("per_page", "96")
+	apiQuery.Set("order", "newest_first")
+	apiQuery.Set("search_text", job.Query)
+	apiQuery.Set("catalog_ids", strings.Join(job.CatalogIDs, ","))
+	apiQuery.Set("size_ids", strings.Join(job.SizeIDs, ","))
+	apiQuery.Set("brand_ids", strings.Join(job.BrandIDs, ","))
+	if job.MinPrice > 0 {
+		apiQuery.Set("price_from", strconv.Itoa(job.MinPrice))
+	}
+	if job.MaxPrice > 0 {
+		apiQuery.Set("price_to", strconv.Itoa(job.MaxPrice))
+	}
+	if job.Currency != "" {
+		apiQuery.Set("currency", job.Currency)
+	}
+	apiURL.RawQuery = apiQuery.Encode()
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL.String(), nil)
 	if err != nil {
 		logger.Error("Error making request", zap.Error(err))
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) Gecko/20100101 Firefox/147.0")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Accept-Language", "fr,fr-FR;q=0.9,en-US;q=0.8,en;q=0.7")
+	req.Header.Set("Accept-Language", "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7")
 	// req.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	req.Header.Set("Connection", "keep-alive")
-	req.Header.Set("Referer", "https://www.vinted.fr/")
+	req.Header.Set("Referer", baseURL+"/")
 	req.Header.Set("Upgrade-Insecure-Requests", "1")
 	req.Header.Set("Sec-Fetch-Dest", "document")
 	req.Header.Set("Sec-Fetch-Mode", "navigate")
@@ -85,13 +127,12 @@ func (s *VintedScraper) Search(ctx context.Context, job models.ScrapeJob) ([]mod
 	req.Header.Set("Pragma", "no-cache")
 	req.Header.Set("Cache-Control", "no-cache")
 	req.Header.Set("TE", "trailers")
-	resp, err := client.Do(req)
+	resp, err := doWithRetry(ctx, client, req)
 	if err != nil {
 		logger.Error("Error making request", zap.Error(err))
 		return nil, err
 	}
-	defer resp.Body.Close()
-	bodyText, err := io.ReadAll(resp.Body)
+	bodyText, err := readResponseBody(resp)
 	if err != nil {
 		logger.Error("Error reading response body", zap.Error(err))
 		return nil, err
@@ -120,6 +161,53 @@ func (s *VintedScraper) Search(ctx context.Context, job models.ScrapeJob) ([]mod
 		})
 	}
 	return items, nil
+}
+
+func doWithRetry(ctx context.Context, client httpClient, req *http.Request) (*http.Response, error) {
+	var lastErr error
+	for attempt := 0; attempt < maxRequestAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		resp, err := client.Do(req)
+		if err == nil && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
+			return resp, nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = fmt.Errorf("Vinted request returned %s", resp.Status)
+			_ = resp.Body.Close()
+		}
+		if attempt == maxRequestAttempts-1 {
+			break
+		}
+		delay := time.Duration(1<<attempt) * 250 * time.Millisecond
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, fmt.Errorf("Vinted request failed after %d attempts: %w", maxRequestAttempts, lastErr)
+}
+
+func readResponseBody(resp *http.Response) ([]byte, error) {
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return nil, fmt.Errorf("Vinted returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxResponseBytes {
+		return nil, fmt.Errorf("Vinted response exceeds %d bytes", maxResponseBytes)
+	}
+	return body, nil
 }
 
 func (s *VintedScraper) Name() string {
