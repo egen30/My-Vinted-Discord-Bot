@@ -151,16 +151,63 @@ func (s *VintedScraper) Search(ctx context.Context, job models.ScrapeJob) ([]mod
 			continue
 		}
 		items = append(items, models.Item{
-			ID:       strconv.FormatInt(item.ID, 10),
-			Title:    item.Title,
-			Price:    price,
-			Currency: item.Price.CurrencyCode,
-			URL:      item.URL,
-			ImageURL: item.Photo.URL,
-			Platform: "vinted",
+			ID:        strconv.FormatInt(item.ID, 10),
+			Title:     item.Title,
+			Brand:     item.BrandTitle,
+			Size:      item.SizeTitle,
+			Price:     price,
+			Currency:  item.Price.CurrencyCode,
+			URL:       item.URL,
+			ImageURL:  item.Photo.URL,
+			ImageURLs: imageURLs(item.Photos, item.Photo.URL),
+			Platform:  "vinted",
 		})
 	}
 	return items, nil
+}
+
+func imageURLs(photos []struct {
+	ID                  int64       `json:"id"`
+	ImageNo             int         `json:"image_no"`
+	Width               int         `json:"width"`
+	Height              int         `json:"height"`
+	DominantColor       string      `json:"dominant_color"`
+	DominantColorOpaque string      `json:"dominant_color_opaque"`
+	URL                 string      `json:"url"`
+	IsMain              bool        `json:"is_main"`
+	Thumbnails          []struct {
+		Type         string      `json:"type"`
+		URL          string      `json:"url"`
+		Width        int         `json:"width"`
+		Height       int         `json:"height"`
+		OriginalSize interface{} `json:"original_size"`
+	} `json:"thumbnails"`
+	HighResolution struct {
+		ID          string      `json:"id"`
+		Timestamp   int         `json:"timestamp"`
+		Orientation interface{} `json:"orientation"`
+	} `json:"high_resolution"`
+	IsSuspicious bool   `json:"is_suspicious"`
+	FullSizeURL  string `json:"full_size_url"`
+	IsHidden     bool   `json:"is_hidden"`
+	Extra        struct{} `json:"extra"`
+}, primary string) []string {
+	urls := make([]string, 0, len(photos)+1)
+	seen := make(map[string]struct{})
+	appendURL := func(value string) {
+		if value != "" {
+			if _, ok := seen[value]; !ok {
+				seen[value] = struct{}{}
+				urls = append(urls, value)
+			}
+		}
+	}
+	appendURL(primary)
+	for _, photo := range photos {
+		appendURL(photo.URL)
+		appendURL(photo.FullSizeURL)
+	}
+	return urls
 }
 
 func doWithRetry(ctx context.Context, client httpClient, req *http.Request) (*http.Response, error) {

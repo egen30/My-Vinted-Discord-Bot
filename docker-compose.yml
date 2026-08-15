@@ -15,8 +15,10 @@ services:
       - MAX_PRICE=${MAX_PRICE}
       - RATE_LIMIT_MS=${RATE_LIMIT_MS:-15000}
       - REDIS_ADDR=redis:6379
+      - DATABASE_URL=postgres://vinted:vinted@postgres:5432/vinted?sslmode=disable
     depends_on:
       - redis
+      - postgres
     # volumes:
     #   - ./logs:/app/logs
 
@@ -29,5 +31,19 @@ services:
     volumes:
       - redis_data:/data
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: vinted-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: vinted
+      POSTGRES_PASSWORD: vinted
+      POSTGRES_DB: vinted
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
 volumes:
   redis_data:
+  postgres_data:
