@@ -14,8 +14,10 @@ import (
 	"github.com/2spy/vinted-discord-bot/internal/scheduler"
 	"github.com/2spy/vinted-discord-bot/internal/scrapers/vinted"
 	"github.com/2spy/vinted-discord-bot/internal/store"
+	"github.com/2spy/vinted-discord-bot/pkg/evaluation"
 	"github.com/2spy/vinted-discord-bot/pkg/logger"
 	"github.com/2spy/vinted-discord-bot/pkg/models"
+	"github.com/2spy/vinted-discord-bot/pkg/pricing"
 	"go.uber.org/zap"
 )
 
@@ -29,6 +31,11 @@ func main() {
 	config, err := loadConfig()
 	if err != nil {
 		logger.Error("Invalid worker configuration", zap.Error(err))
+		os.Exit(1)
+	}
+	fallbackRules, err := pricing.ParseFallbackRules(config.resaleRules)
+	if err != nil {
+		logger.Error("Invalid RESALE_RULES configuration", zap.Error(err))
 		os.Exit(1)
 	}
 
@@ -66,6 +73,21 @@ func main() {
 	processItems := func(items []models.Item) {
 		for _, item := range items {
 			if item.Price < float64(config.minPrice) || item.Price > float64(config.maxPrice) {
+				continue
+			}
+			condition := evaluation.Condition(strings.ToLower(strings.TrimSpace(item.Condition)))
+			model, modelErr := evaluation.MatchModel(item.Brand + " " + item.Title)
+			result := evaluation.Result{Reason: "model did not match"}
+			if modelErr == nil {
+				estimate, hasEstimate := pricing.Estimator{MinimumModelData: 8, MinimumSegmentData: 5, Fallback: fallbackRules}.Estimate(model, item.Size, string(condition))
+				if hasEstimate {
+					result = evaluation.Evaluate(item, evaluation.PricePolicy{ExpectedResaleCents: estimate.ExpectedCents, MinimumProfitCents: config.minimumProfitCents}, condition)
+				} else {
+					result.Reason = "no resale estimate available"
+				}
+			}
+			logger.Info("Listing evaluated", zap.String("item_id", item.ID), zap.String("reason", result.Reason), zap.Bool("qualified", result.Qualified))
+			if config.opportunityMode == "qualified" && !result.Qualified {
 				continue
 			}
 			// Claim the item before delivering so a later poll cannot send it twice.
@@ -147,19 +169,22 @@ func main() {
 }
 
 type config struct {
-	webhookURL        string
-	searchQuery       string
-	vintedBaseURL     string
-	catalogIDs        []string
-	sizeIDs           []string
-	brandIDs          []string
-	currency          string
-	minPrice          int
-	maxPrice          int
-	interval          time.Duration
-	redisAddress      string
-	databaseURL       string
-	searchConcurrency int
+	webhookURL         string
+	searchQuery        string
+	vintedBaseURL      string
+	catalogIDs         []string
+	sizeIDs            []string
+	brandIDs           []string
+	currency           string
+	minPrice           int
+	maxPrice           int
+	interval           time.Duration
+	redisAddress       string
+	databaseURL        string
+	searchConcurrency  int
+	resaleRules        string
+	minimumProfitCents int64
+	opportunityMode    string
 }
 
 func loadConfig() (config, error) {
@@ -186,20 +211,30 @@ func loadConfig() (config, error) {
 		redisAddress = "localhost:6379"
 	}
 	return config{
-		webhookURL:        strings.TrimSpace(os.Getenv("DISCORD_WEBHOOK_URL")),
-		searchQuery:       strings.TrimSpace(os.Getenv("SEARCH_QUERY")),
-		vintedBaseURL:     strings.TrimSpace(os.Getenv("VINTED_BASE_URL")),
-		catalogIDs:        splitIDs(os.Getenv("CATALOG_IDS")),
-		sizeIDs:           splitIDs(os.Getenv("SIZE_IDS")),
-		brandIDs:          splitIDs(os.Getenv("BRAND_IDS")),
-		currency:          strings.TrimSpace(os.Getenv("CURRENCY")),
-		minPrice:          minPrice,
-		maxPrice:          maxPrice,
-		interval:          time.Duration(rateMS) * time.Millisecond,
-		redisAddress:      redisAddress,
-		databaseURL:       strings.TrimSpace(os.Getenv("DATABASE_URL")),
-		searchConcurrency: parsePositiveEnv("SEARCH_CONCURRENCY", 2),
+		webhookURL:         strings.TrimSpace(os.Getenv("DISCORD_WEBHOOK_URL")),
+		searchQuery:        strings.TrimSpace(os.Getenv("SEARCH_QUERY")),
+		vintedBaseURL:      strings.TrimSpace(os.Getenv("VINTED_BASE_URL")),
+		catalogIDs:         splitIDs(os.Getenv("CATALOG_IDS")),
+		sizeIDs:            splitIDs(os.Getenv("SIZE_IDS")),
+		brandIDs:           splitIDs(os.Getenv("BRAND_IDS")),
+		currency:           strings.TrimSpace(os.Getenv("CURRENCY")),
+		minPrice:           minPrice,
+		maxPrice:           maxPrice,
+		interval:           time.Duration(rateMS) * time.Millisecond,
+		redisAddress:       redisAddress,
+		databaseURL:        strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		searchConcurrency:  parsePositiveEnv("SEARCH_CONCURRENCY", 2),
+		resaleRules:        strings.TrimSpace(os.Getenv("RESALE_RULES")),
+		minimumProfitCents: int64(parsePositiveEnv("MIN_PROFIT_EUR", 13)) * 100,
+		opportunityMode:    configuredOpportunityMode(),
 	}, nil
+}
+
+func configuredOpportunityMode() string {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("OPPORTUNITY_MODE")), "qualified") {
+		return "qualified"
+	}
+	return "shadow"
 }
 
 func parsePositiveEnv(name string, fallback int) int {
