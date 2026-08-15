@@ -62,6 +62,20 @@ func main() {
 			logger.Info("Google Sheets history synchronized", zap.Int("accepted_rows", len(snapshot.Sales)), zap.Int("rejected_rows", len(snapshot.Rejected)))
 		}
 	}
+	lastHistorySync := time.Time{}
+	syncHistory := func() {
+		if historySyncer == nil || (!lastHistorySync.IsZero() && time.Since(lastHistorySync) < config.historySyncInterval) {
+			return
+		}
+		snapshot, syncErr := historySyncer.Sync(context.Background())
+		lastHistorySync = time.Now()
+		if syncErr != nil {
+			logger.Error("Google Sheets sync failed; retaining last good pricing snapshot", zap.Error(syncErr))
+			return
+		}
+		salesHistory = snapshot.Sales
+		logger.Info("Google Sheets history synchronized", zap.Int("accepted_rows", len(snapshot.Sales)), zap.Int("rejected_rows", len(snapshot.Rejected)))
+	}
 
 	notifier, err := notify.NewDiscordNotifier(config.webhookURL)
 	if err != nil {
@@ -143,6 +157,7 @@ func main() {
 	}
 
 	run := func() {
+		syncHistory()
 		if listingStore != nil {
 			searches, err := listingStore.ListSearches(ctx, true)
 			if err != nil {
@@ -153,13 +168,16 @@ func main() {
 				err = scheduler.RunOnce(ctx, searches, config.searchConcurrency, func(searchCtx context.Context, search models.Search) error {
 					searchJob, parseErr := vinted.JobFromSearchURL(search.URL)
 					if parseErr != nil {
+						_ = listingStore.RecordSearchAttempt(context.Background(), search.ID, parseErr)
 						return parseErr
 					}
 					searchJob.SearchName = search.Name
 					items, searchErr := scraper.Search(searchCtx, searchJob)
 					if searchErr != nil {
+						_ = listingStore.RecordSearchAttempt(context.Background(), search.ID, searchErr)
 						return searchErr
 					}
+					_ = listingStore.RecordSearchAttempt(context.Background(), search.ID, nil)
 					processItems(items)
 					return nil
 				})
@@ -193,25 +211,26 @@ func main() {
 }
 
 type config struct {
-	webhookURL         string
-	searchQuery        string
-	vintedBaseURL      string
-	catalogIDs         []string
-	sizeIDs            []string
-	brandIDs           []string
-	currency           string
-	minPrice           int
-	maxPrice           int
-	interval           time.Duration
-	redisAddress       string
-	databaseURL        string
-	searchConcurrency  int
-	resaleRules        string
-	minimumProfitCents int64
-	opportunityMode    string
-	googleCredentials  string
-	googleSheetID      string
-	googleWorksheet    string
+	webhookURL          string
+	searchQuery         string
+	vintedBaseURL       string
+	catalogIDs          []string
+	sizeIDs             []string
+	brandIDs            []string
+	currency            string
+	minPrice            int
+	maxPrice            int
+	interval            time.Duration
+	redisAddress        string
+	databaseURL         string
+	searchConcurrency   int
+	historySyncInterval time.Duration
+	resaleRules         string
+	minimumProfitCents  int64
+	opportunityMode     string
+	googleCredentials   string
+	googleSheetID       string
+	googleWorksheet     string
 }
 
 func loadConfig() (config, error) {
@@ -238,25 +257,26 @@ func loadConfig() (config, error) {
 		redisAddress = "localhost:6379"
 	}
 	return config{
-		webhookURL:         strings.TrimSpace(os.Getenv("DISCORD_WEBHOOK_URL")),
-		searchQuery:        strings.TrimSpace(os.Getenv("SEARCH_QUERY")),
-		vintedBaseURL:      strings.TrimSpace(os.Getenv("VINTED_BASE_URL")),
-		catalogIDs:         splitIDs(os.Getenv("CATALOG_IDS")),
-		sizeIDs:            splitIDs(os.Getenv("SIZE_IDS")),
-		brandIDs:           splitIDs(os.Getenv("BRAND_IDS")),
-		currency:           strings.TrimSpace(os.Getenv("CURRENCY")),
-		minPrice:           minPrice,
-		maxPrice:           maxPrice,
-		interval:           time.Duration(rateMS) * time.Millisecond,
-		redisAddress:       redisAddress,
-		databaseURL:        strings.TrimSpace(os.Getenv("DATABASE_URL")),
-		searchConcurrency:  parsePositiveEnv("SEARCH_CONCURRENCY", 2),
-		resaleRules:        strings.TrimSpace(os.Getenv("RESALE_RULES")),
-		minimumProfitCents: int64(parsePositiveEnv("MIN_PROFIT_EUR", 13)) * 100,
-		opportunityMode:    configuredOpportunityMode(),
-		googleCredentials:  strings.TrimSpace(os.Getenv("GOOGLE_SERVICE_ACCOUNT_JSON")),
-		googleSheetID:      strings.TrimSpace(os.Getenv("GOOGLE_SHEET_ID")),
-		googleWorksheet:    strings.TrimSpace(os.Getenv("GOOGLE_WORKSHEET")),
+		webhookURL:          strings.TrimSpace(os.Getenv("DISCORD_WEBHOOK_URL")),
+		searchQuery:         strings.TrimSpace(os.Getenv("SEARCH_QUERY")),
+		vintedBaseURL:       strings.TrimSpace(os.Getenv("VINTED_BASE_URL")),
+		catalogIDs:          splitIDs(os.Getenv("CATALOG_IDS")),
+		sizeIDs:             splitIDs(os.Getenv("SIZE_IDS")),
+		brandIDs:            splitIDs(os.Getenv("BRAND_IDS")),
+		currency:            strings.TrimSpace(os.Getenv("CURRENCY")),
+		minPrice:            minPrice,
+		maxPrice:            maxPrice,
+		interval:            time.Duration(rateMS) * time.Millisecond,
+		redisAddress:        redisAddress,
+		databaseURL:         strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		searchConcurrency:   parsePositiveEnv("SEARCH_CONCURRENCY", 2),
+		resaleRules:         strings.TrimSpace(os.Getenv("RESALE_RULES")),
+		minimumProfitCents:  int64(parsePositiveEnv("MIN_PROFIT_EUR", 13)) * 100,
+		opportunityMode:     configuredOpportunityMode(),
+		googleCredentials:   strings.TrimSpace(os.Getenv("GOOGLE_SERVICE_ACCOUNT_JSON")),
+		googleSheetID:       strings.TrimSpace(os.Getenv("GOOGLE_SHEET_ID")),
+		googleWorksheet:     strings.TrimSpace(os.Getenv("GOOGLE_WORKSHEET")),
+		historySyncInterval: time.Duration(parsePositiveEnv("HISTORY_SYNC_INTERVAL_MIN", 60)) * time.Minute,
 	}, nil
 }
 

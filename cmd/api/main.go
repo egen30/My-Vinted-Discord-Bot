@@ -51,6 +51,8 @@ func (h *searchHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.list(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/searches":
 		h.create(w, r)
+	case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/searches/"):
+		h.update(w, r)
 	case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/searches/") && strings.HasSuffix(r.URL.Path, "/enabled"):
 		h.setEnabled(w, r)
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/searches/"):
@@ -105,6 +107,30 @@ func (h *searchHandler) setEnabled(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *searchHandler) update(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/searches/"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid search ID", http.StatusBadRequest)
+		return
+	}
+	var input models.Search
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if err := validateSearch(input); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	input.ID = id
+	updated, err := h.store.UpdateSearch(r.Context(), input)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
 }
 
 func (h *searchHandler) delete(w http.ResponseWriter, r *http.Request) {

@@ -68,6 +68,25 @@ func (s *PostgresStore) DeleteSearch(ctx context.Context, id int64) error {
 	return nil
 }
 
+func (s *PostgresStore) UpdateSearch(ctx context.Context, search models.Search) (models.Search, error) {
+	const query = `UPDATE searches SET name = $1, url = $2, enabled = $3, priority = $4, notes = $5 WHERE id = $6
+RETURNING id, name, url, enabled, priority, notes, created_at, last_attempted_at, last_successful_at, last_error`
+	updated, err := scanSearch(s.db.QueryRow(ctx, query, search.Name, search.URL, search.Enabled, search.Priority, search.Notes, search.ID))
+	if err != nil {
+		return models.Search{}, fmt.Errorf("update search: %w", err)
+	}
+	return updated, nil
+}
+
+func (s *PostgresStore) RecordSearchAttempt(ctx context.Context, id int64, runErr error) error {
+	if runErr == nil {
+		_, err := s.db.Exec(ctx, `UPDATE searches SET last_attempted_at = now(), last_successful_at = now(), last_error = '' WHERE id = $1`, id)
+		return err
+	}
+	_, err := s.db.Exec(ctx, `UPDATE searches SET last_attempted_at = now(), last_error = $2 WHERE id = $1`, id, runErr.Error())
+	return err
+}
+
 type searchRow interface {
 	Scan(dest ...any) error
 }
